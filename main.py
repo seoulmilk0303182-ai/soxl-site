@@ -1,125 +1,118 @@
-print("THIS IS MY MAIN")
-
 """
-시발 SOXL 왜 올라요? — 백엔드 v2
-- 프리장/애프터장 포함
-- iShares에서 실제 비중 자동 스크래핑 (실패 시 하드코딩 fallback)
-- 5분 자동 갱신
+시발 SOXL 왜 올라요? — 백엔드 v4
+- stockanalysis.com HTML 테이블 직접 파싱 (BeautifulSoup 불필요, re만 사용)
+- Finnhub 실시간 주가 (프리/애프터 포함)
+- 5분 주가 갱신 / 하루 1회 비중 갱신
 """
 
 import time
 import threading
-import csv
-import io
+import os
+import re
 from flask import Flask, jsonify, send_from_directory
 import requests
-import os
 
-FINNHUB_API_KEY =  os.environ.get("FINNHUB_API_KEY")
-import urllib.request
+FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY", "")
 
 app = Flask(__name__, static_folder="static")
 
-# ── 하드코딩 fallback 비중 (iShares 스크래핑 실패 시 사용) ──────
+# ── Fallback 비중 (스크래핑 실패 시) — 2026년 5월 기준 ──────────
 FALLBACK_HOLDINGS = [
-    {"ticker": "NVDA",  "name": "엔비디아",            "weight": 8.50},
-    {"ticker": "AVGO",  "name": "브로드컴",            "weight": 8.30},
-    {"ticker": "AMD",   "name": "AMD",                  "weight": 5.80},
-    {"ticker": "QCOM",  "name": "퀄컴",                 "weight": 5.70},
-    {"ticker": "TXN",   "name": "텍사스인스트루먼트",   "weight": 5.50},
-    {"ticker": "INTC",  "name": "인텔",                 "weight": 5.30},
-    {"ticker": "ADI",   "name": "아날로그디바이스",     "weight": 5.10},
-    {"ticker": "MRVL",  "name": "마벨테크",             "weight": 4.90},
-    {"ticker": "MU",    "name": "마이크론",             "weight": 4.80},
-    {"ticker": "KLAC",  "name": "KLA",                  "weight": 4.60},
-    {"ticker": "LRCX",  "name": "램리서치",             "weight": 4.40},
-    {"ticker": "AMAT",  "name": "어플라이드머티리얼즈", "weight": 4.30},
-    {"ticker": "NXPI",  "name": "NXP세미컨덕터",        "weight": 3.80},
-    {"ticker": "MCHP",  "name": "마이크로칩테크",       "weight": 3.50},
-    {"ticker": "ON",    "name": "온세미컨덕터",         "weight": 3.20},
-    {"ticker": "MPWR",  "name": "모노리식파워",         "weight": 3.00},
-    {"ticker": "SWKS",  "name": "스카이웍스",           "weight": 2.80},
-    {"ticker": "STM",   "name": "ST마이크로",           "weight": 2.50},
-    {"ticker": "QRVO",  "name": "Qorvo",                "weight": 2.30},
-    {"ticker": "ENTG",  "name": "앤테그리스",           "weight": 2.10},
-    {"ticker": "OLED",  "name": "유니버설디스플레이",   "weight": 1.90},
-    {"ticker": "WOLF",  "name": "울프스피드",           "weight": 1.70},
-    {"ticker": "FORM",  "name": "FormFactor",            "weight": 1.50},
-    {"ticker": "COHU",  "name": "Cohu",                 "weight": 1.30},
-    {"ticker": "MKSI",  "name": "MKS인스트루먼트",      "weight": 1.20},
-    {"ticker": "ACLS",  "name": "Axcelis",               "weight": 1.10},
-    {"ticker": "POWI",  "name": "Power Integrations",    "weight": 1.00},
-    {"ticker": "DIOD",  "name": "Diodes Inc",            "weight": 0.90},
-    {"ticker": "AMKR",  "name": "Amkor",                 "weight": 0.80},
-    {"ticker": "ICHR",  "name": "Ichor Holdings",        "weight": 0.70},
+    {"ticker": "MU",    "name": "마이크론",             "weight": 11.04},
+    {"ticker": "AMD",   "name": "AMD",                  "weight": 9.51},
+    {"ticker": "AVGO",  "name": "브로드컴",             "weight": 6.58},
+    {"ticker": "INTC",  "name": "인텔",                 "weight": 6.53},
+    {"ticker": "MRVL",  "name": "마벨테크",             "weight": 6.18},
+    {"ticker": "NVDA",  "name": "엔비디아",             "weight": 5.96},
+    {"ticker": "AMAT",  "name": "어플라이드머티리얼즈", "weight": 4.44},
+    {"ticker": "QCOM",  "name": "퀄컴",                 "weight": 4.21},
+    {"ticker": "TXN",   "name": "텍사스인스트루먼트",   "weight": 3.67},
+    {"ticker": "NXPI",  "name": "NXP세미컨덕터",        "weight": 3.58},
+    {"ticker": "MPWR",  "name": "모노리식파워",         "weight": 3.52},
+    {"ticker": "LRCX",  "name": "램리서치",             "weight": 3.35},
+    {"ticker": "KLAC",  "name": "KLA",                  "weight": 3.12},
+    {"ticker": "TER",   "name": "테라다인",             "weight": 2.95},
+    {"ticker": "ADI",   "name": "아날로그디바이스",     "weight": 2.90},
+    {"ticker": "MCHP",  "name": "마이크로칩테크",       "weight": 2.60},
+    {"ticker": "TSM",   "name": "TSMC",                 "weight": 2.56},
+    {"ticker": "ASML",  "name": "ASML",                 "weight": 2.50},
+    {"ticker": "ON",    "name": "온세미컨덕터",         "weight": 2.47},
+    {"ticker": "ALAB",  "name": "Astera Labs",           "weight": 2.42},
+    {"ticker": "CRDO",  "name": "Credo Technology",      "weight": 1.83},
+    {"ticker": "MTSI",  "name": "MACOM Technology",      "weight": 1.34},
+    {"ticker": "ENTG",  "name": "앤테그리스",           "weight": 1.06},
+    {"ticker": "ASX",   "name": "ASE Technology",        "weight": 1.06},
+    {"ticker": "UMC",   "name": "UMC",                  "weight": 0.83},
 ]
 
 NAME_MAP = {h["ticker"]: h["name"] for h in FALLBACK_HOLDINGS}
 
-CACHE = {"data": None}
-CACHE_LOCK = threading.Lock()
-CACHE_TTL  = 300   # 5분
-WEIGHT_TTL = 86400 # 비중은 하루 1회 갱신
+CACHE        = {"data": None}
+CACHE_LOCK   = threading.Lock()
+CACHE_TTL    = 300
+WEIGHT_TTL   = 86400
 
 _weight_cache = {"holdings": None, "updated_at": 0}
 
-# ── iShares 비중 스크래핑 ────────────────────────────────────────
-def fetch_ishares_weights():
-    """
-    iShares SOXX CSV 다운로드로 실제 비중 가져오기.
-    실패 시 fallback 반환.
-    """
-    url = (
-        "https://www.ishares.com/us/products/239705/SOXX/"
-        "1467271812596.ajax?fileType=csv&fileName=SOXX_holdings"
-        "&dataType=fund"
-    )
+# ── 비중 스크래핑 ────────────────────────────────────────────────
+def fetch_weights_stockanalysis():
+    url = "https://stockanalysis.com/etf/soxx/holdings/"
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
         ),
-        "Referer": "https://www.ishares.com/",
+        "Accept": "text/html",
+        "Accept-Language": "en-US,en;q=0.9",
     }
-    try:
-        req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=15) as r:
-            raw = r.read().decode("utf-8", errors="ignore")
+    r = requests.get(url, headers=headers, timeout=20)
+    r.raise_for_status()
+    html = r.text
 
-        # CSV 앞부분 메타 행 건너뛰기 (빈 줄 이후가 실제 데이터)
-        lines = raw.splitlines()
-        start = 0
-        for i, line in enumerate(lines):
-            if line.startswith("Ticker,") or line.startswith('"Ticker"'):
-                start = i
-                break
+    # <tbody> 안의 <tr> 행들 추출
+    tbody = re.search(r'<tbody[^>]*>(.*?)</tbody>', html, re.S)
+    if not tbody:
+        raise ValueError("tbody not found")
 
-        reader = csv.DictReader(io.StringIO("\n".join(lines[start:])))
-        holdings = []
-        for row in reader:
-            ticker = row.get("Ticker", "").strip().strip('"')
-            weight_str = row.get("Weight (%)", row.get("Weightings", "0")).strip().strip('"')
-            if not ticker or ticker == "-":
-                continue
-            try:
-                weight = float(weight_str)
-            except ValueError:
-                continue
-            if weight <= 0:
-                continue
-            holdings.append({
-                "ticker": ticker,
-                "name":   NAME_MAP.get(ticker, ticker),
-                "weight": round(weight, 4),
-            })
+    rows = re.findall(r'<tr[^>]*>(.*?)</tr>', tbody.group(1), re.S)
+    if not rows:
+        raise ValueError("tr rows not found")
 
-        if len(holdings) >= 10:
-            print(f"[{time.strftime('%H:%M:%S')}] iShares 비중 {len(holdings)}개 갱신 완료")
-            return sorted(holdings, key=lambda x: x["weight"], reverse=True)
-    except Exception as e:
-        print(f"[{time.strftime('%H:%M:%S')}] iShares 스크래핑 실패 ({e}), fallback 사용")
+    holdings = []
+    for row in rows:
+        # 각 <td> 셀 추출
+        cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.S)
+        if len(cells) < 4:
+            continue
 
-    return FALLBACK_HOLDINGS
+        # 티커: 두 번째 셀에서 링크 텍스트 or 텍스트
+        ticker_cell = re.sub(r'<[^>]+>', '', cells[1]).strip()
+        if not ticker_cell or ticker_cell == 'Symbol':
+            continue
+
+        # 비중: 세 번째 셀 (% Weight)
+        weight_raw = re.sub(r'<[^>]+>', '', cells[3]).strip().replace('%', '').replace(',', '')
+        try:
+            weight = float(weight_raw)
+        except ValueError:
+            continue
+        if weight <= 0:
+            continue
+
+        holdings.append({
+            "ticker": ticker_cell.upper(),
+            "name":   NAME_MAP.get(ticker_cell.upper(), ticker_cell),
+            "weight": round(weight, 4),
+        })
+
+    if len(holdings) < 10:
+        raise ValueError(f"파싱된 종목 수 부족: {len(holdings)}")
+
+    holdings.sort(key=lambda x: x["weight"], reverse=True)
+    print(f"[{time.strftime('%H:%M:%S')}] 비중 {len(holdings)}개 갱신 완료 (stockanalysis)")
+    return holdings
+
 
 def get_holdings():
     now = time.time()
@@ -127,76 +120,58 @@ def get_holdings():
         _weight_cache["holdings"] is None
         or now - _weight_cache["updated_at"] > WEIGHT_TTL
     ):
-        _weight_cache["holdings"]   = fetch_ishares_weights()
-        _weight_cache["updated_at"] = now
+        try:
+            _weight_cache["holdings"]   = fetch_weights_stockanalysis()
+            _weight_cache["updated_at"] = now
+        except Exception as e:
+            print(f"[WARN] 비중 스크래핑 실패: {e} → fallback 사용")
+            if _weight_cache["holdings"] is None:
+                _weight_cache["holdings"]   = FALLBACK_HOLDINGS
+                _weight_cache["updated_at"] = now
     return _weight_cache["holdings"]
 
-# ── 실시간 주가 (프리/애프터 포함) ──────────────────────────────
+
+# ── 실시간 주가 (Finnhub) ────────────────────────────────────────
 def fetch_single(ticker):
     try:
         url = (
             f"https://finnhub.io/api/v1/quote"
-            f"?symbol={ticker}"
-            f"&token={FINNHUB_API_KEY}"
+            f"?symbol={ticker}&token={FINNHUB_API_KEY}"
         )
-
-        r = requests.get(url, timeout=10)
-        data = r.json()
-
-        current = data.get("c", 0)
-        prev = data.get("pc", current)
-
+        d = requests.get(url, timeout=10).json()
+        current = d.get("c", 0)
+        prev    = d.get("pc", current) or current
         if not current:
-            return {
-                "price": 0,
-                "prevClose": 0,
-                "changePercent": 0,
-            }
-
-        change = (
-            ((current - prev) / prev) * 100
-            if prev else 0
-        )
-
+            return {"price": 0, "prevClose": 0, "changePercent": 0}
+        chg = ((current - prev) / prev * 100) if prev else 0
         return {
-            "price": round(current, 2),
-            "prevClose": round(prev, 2),
-            "changePercent": round(change, 4),
+            "price":         round(current, 2),
+            "prevClose":     round(prev, 2),
+            "changePercent": round(chg, 4),
         }
-
     except Exception as e:
-        print(f"[{ticker}] 오류: {e}")
-        return {
-            "price": 0,
-            "prevClose": 0,
-            "changePercent": 0,
-        }
+        print(f"  [{ticker}] 오류: {e}")
+        return {"price": 0, "prevClose": 0, "changePercent": 0}
 
+
+# ── 캐시 갱신 ────────────────────────────────────────────────────
 def refresh_cache():
     print(f"[{time.strftime('%H:%M:%S')}] 주가 갱신 시작...")
-    holdings = get_holdings()
+    holdings    = get_holdings()
     all_tickers = ["SOXX", "SOXL"] + [h["ticker"] for h in holdings]
 
-    # 병렬 다운로드 (yfinance download는 pre/post 미지원 → 단건 병렬)
     results = {}
-    threads = []
 
-    def _fetch(ticker):
-        results[ticker] = fetch_single(ticker)
+    def _fetch(t):
+        results[t] = fetch_single(t)
 
-    for t in all_tickers:
-        th = threading.Thread(target=_fetch, args=(t,))
-        th.start()
-        threads.append(th)
-    for th in threads:
-        th.join(timeout=20)
+    threads = [threading.Thread(target=_fetch, args=(t,)) for t in all_tickers]
+    for th in threads: th.start()
+    for th in threads: th.join(timeout=20)
 
     def etf(t):
         d = results.get(t, {})
-        return {
-            "price":         d.get("price", 0),
-            "changePercent": d.get("changePercent", 0),
-        }
+        return {"price": d.get("price", 0), "changePercent": d.get("changePercent", 0)}
 
     holding_data = []
     for h in holdings:
@@ -213,12 +188,11 @@ def refresh_cache():
 
     soxx = etf("SOXX")
     soxl = etf("SOXL")
-
     data = {
-        "soxx":       soxx,
-        "soxl":       soxl,
-        "holdings":   holding_data,
-        "updated_at": int(time.time()),
+        "soxx":              soxx,
+        "soxl":              soxl,
+        "holdings":          holding_data,
+        "updated_at":        int(time.time()),
         "weight_updated_at": int(_weight_cache["updated_at"]),
     }
     with CACHE_LOCK:
@@ -230,26 +204,26 @@ def refresh_cache():
         f"SOXL {soxl['changePercent']:+.2f}%"
     )
 
+
 def background_worker():
     while True:
         try:
             refresh_cache()
         except Exception as e:
-            print(f"[ERROR] 갱신 실패: {e}")
+            print(f"[ERROR] {e}")
         time.sleep(CACHE_TTL)
 
-# ── Flask 라우트 ─────────────────────────────────────────────────
+
+refresh_cache()
+threading.Thread(target=background_worker, daemon=True).start()
+
 
 @app.route("/api/data")
 def api_data():
     with CACHE_LOCK:
         data = CACHE["data"]
-
     if data is None:
-        return jsonify({
-            "error": "데이터 준비 중입니다. 잠시 후 새로고침하세요."
-        }), 503
-
+        return jsonify({"error": "데이터 준비 중. 잠시 후 새로고침하세요."}), 503
     resp = jsonify(data)
     resp.headers["Cache-Control"] = "no-cache"
     return resp
@@ -259,17 +233,6 @@ def api_data():
 def index():
     return send_from_directory("static", "index.html")
 
-
-# 최초 1회 데이터 로딩
-refresh_cache()
-
-# 백그라운드 갱신 스레드 시작
-threading.Thread(
-    target=background_worker,
-    daemon=True
-).start()
-
-print(app.url_map)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=False)
