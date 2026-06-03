@@ -12,7 +12,10 @@ import threading
 import csv
 import io
 from flask import Flask, jsonify, send_from_directory
-import yfinance as yf
+import requests
+import os
+
+FINNHUB_API_KEY =  os.environ.get("FINNHUB_API_KEY")
 import urllib.request
 
 app = Flask(__name__, static_folder="static")
@@ -130,47 +133,44 @@ def get_holdings():
 
 # ── 실시간 주가 (프리/애프터 포함) ──────────────────────────────
 def fetch_single(ticker):
-    """
-    yfinance Ticker로 단건 조회.
-    regularMarketPrice  → 정규장 or 가장 최근 종가
-    preMarketPrice      → 프리장
-    postMarketPrice     → 애프터장
-    우선순위: 프리/애프터(있으면) > 정규장
-    """
     try:
-        t = yf.Ticker(ticker)
-        info = t.fast_info          # 빠른 메타데이터
-        price      = getattr(info, "last_price",           None) or 0
-        prev_close = getattr(info, "previous_close",       None) or price
+        url = (
+            f"https://finnhub.io/api/v1/quote"
+            f"?symbol={ticker}"
+            f"&token={FINNHUB_API_KEY}"
+        )
 
-        # fast_info에 pre/post 없으면 .info 시도 (느림)
-        try:
-            full = t.info
-            pre  = full.get("preMarketPrice")
-            post = full.get("postMarketPrice")
-            reg  = full.get("regularMarketPrice") or price
-            prev_close = full.get("regularMarketPreviousClose") or prev_close
+        r = requests.get(url, timeout=10)
+        data = r.json()
 
-            # 현재 어느 세션인지에 따라 최신 가격 선택
-            market_state = full.get("marketState", "REGULAR")
-            if market_state == "PRE"  and pre:
-                price = pre
-            elif market_state in ("POST", "POSTPOST") and post:
-                price = post
-            else:
-                price = reg
-        except Exception:
-            pass
+        current = data.get("c", 0)
+        prev = data.get("pc", current)
 
-        chg = ((price - prev_close) / prev_close * 100) if prev_close else 0
+        if not current:
+            return {
+                "price": 0,
+                "prevClose": 0,
+                "changePercent": 0,
+            }
+
+        change = (
+            ((current - prev) / prev) * 100
+            if prev else 0
+        )
+
         return {
-            "price":         round(float(price), 2),
-            "prevClose":     round(float(prev_close), 2),
-            "changePercent": round(float(chg), 4),
+            "price": round(current, 2),
+            "prevClose": round(prev, 2),
+            "changePercent": round(change, 4),
         }
+
     except Exception as e:
-        print(f"  [{ticker}] 오류: {e}")
-        return {"price": 0, "prevClose": 0, "changePercent": 0}
+        print(f"[{ticker}] 오류: {e}")
+        return {
+            "price": 0,
+            "prevClose": 0,
+            "changePercent": 0,
+        }
 
 def refresh_cache():
     print(f"[{time.strftime('%H:%M:%S')}] 주가 갱신 시작...")
