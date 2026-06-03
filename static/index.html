@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>시발 SOXL 왜 올라요?</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg:     #0d0d0f;
+    --bg2:    #141417;
+    --bg3:    #1c1c21;
+    --border: rgba(255,255,255,0.07);
+    --border2:rgba(255,255,255,0.14);
+    --text:   #ececec;
+    --muted:  #72727d;
+    --dim:    #38383f;
+    --up:     #ff4d4d;
+    --up-bg:  rgba(255,77,77,0.09);
+    --up-bd:  rgba(255,77,77,0.28);
+    --dn:     #4d9fff;
+    --dn-bg:  rgba(77,159,255,0.09);
+    --dn-bd:  rgba(77,159,255,0.28);
+    --mono: 'JetBrains Mono', monospace;
+    --sans: 'Noto Sans KR', sans-serif;
+    --r:  10px;
+    --rl: 16px;
+  }
+  body { font-family: var(--sans); background: var(--bg); color: var(--text); min-height: 100vh; }
+
+  /* HEADER */
+  .hdr {
+    position: sticky; top: 0; z-index: 100;
+    background: rgba(13,13,15,0.93); backdrop-filter: blur(18px);
+    border-bottom: 1px solid var(--border);
+    height: 60px; padding: 0 24px;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .logo { font-family: var(--mono); font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 10px; }
+  .logo .acc { color: var(--up); }
+  .logo .live {
+    font-family: var(--sans); font-size: 10px; font-weight: 500;
+    background: var(--up-bg); border: 1px solid var(--up-bd);
+    color: var(--up); padding: 2px 8px; border-radius: 20px;
+  }
+  .hdr-r { display: flex; align-items: center; gap: 14px; }
+  .countdown { font-family: var(--mono); font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: #4caf50; animation: blink 2s ease infinite; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+  .rbtn {
+    font-family: var(--mono); font-size: 12px;
+    background: var(--bg3); border: 1px solid var(--border2); color: var(--muted);
+    padding: 6px 14px; border-radius: var(--r); cursor: pointer;
+    display: flex; align-items: center; gap: 6px; transition: all .2s;
+  }
+  .rbtn:hover { border-color: var(--up); color: var(--text); }
+  .rbtn svg { transition: transform .6s; }
+  .rbtn.spin svg { animation: rot .7s linear infinite; }
+  @keyframes rot { to { transform: rotate(360deg); } }
+
+  /* MAIN */
+  .main { max-width: 980px; margin: 0 auto; padding: 28px 24px 80px; }
+
+  /* SESSION BADGE */
+  .session-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: var(--mono); font-size: 11px;
+    padding: 4px 12px; border-radius: 20px; margin-bottom: 18px;
+    border: 1px solid;
+  }
+  .session-badge.pre    { color: #f0a500; border-color: rgba(240,165,0,.3); background: rgba(240,165,0,.08); }
+  .session-badge.reg    { color: #4caf50; border-color: rgba(76,175,80,.3); background: rgba(76,175,80,.08); }
+  .session-badge.post   { color: #a78bfa; border-color: rgba(167,139,250,.3); background: rgba(167,139,250,.08); }
+  .session-badge.closed { color: var(--muted); border-color: var(--border2); background: var(--bg3); }
+
+  /* ETF CARDS */
+  .etf-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 20px; }
+  .etf-card {
+    background: var(--bg2); border: 1px solid var(--border);
+    border-radius: var(--rl); padding: 20px 22px;
+    position: relative; overflow: hidden; transition: border-color .3s;
+  }
+  .etf-card.up  { border-color: var(--up-bd); }
+  .etf-card.dn  { border-color: var(--dn-bd); }
+  .etf-tag {
+    position: absolute; top: 14px; right: 14px;
+    font-family: var(--mono); font-size: 10px; color: var(--muted);
+    background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px;
+  }
+  .etf-lbl { font-size: 11px; color: var(--muted); margin-bottom: 6px; letter-spacing: .5px; }
+  .etf-price { font-family: var(--mono); font-size: 34px; font-weight: 700; letter-spacing: -1px; line-height: 1; margin-bottom: 8px; }
+  .etf-chg { font-family: var(--mono); font-size: 20px; font-weight: 700; }
+  .etf-chg.up { color: var(--up); }
+  .etf-chg.dn  { color: var(--dn); }
+  .etf-sub { font-size: 11px; color: var(--muted); margin-top: 6px; }
+
+  /* VERDICT */
+  .verdict {
+    background: var(--bg2); border: 1px solid var(--border);
+    border-radius: var(--rl); padding: 18px 22px;
+    margin-bottom: 22px; display: flex; gap: 14px; align-items: flex-start;
+    transition: border-color .3s;
+  }
+  .verdict.up { border-color: var(--up-bd); }
+  .verdict.dn  { border-color: var(--dn-bd); }
+  .vi { font-size: 34px; line-height: 1; flex-shrink: 0; }
+  .vt { font-size: 16px; font-weight: 700; line-height: 1.4; }
+  .vs { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .vc { font-family: var(--mono); font-size: 13px; font-weight: 700; margin-top: 8px; }
+  .vc.up { color: var(--up); }
+  .vc.dn  { color: var(--dn); }
+
+  /* TOOLBAR */
+  .toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+  .sec-title { font-family: var(--mono); font-size: 11px; color: var(--muted); letter-spacing: 1.5px; text-transform: uppercase; margin-right: auto; }
+  .fbtn {
+    font-size: 12px; font-weight: 500;
+    padding: 5px 14px; border-radius: 20px;
+    border: 1px solid var(--border2); background: transparent; color: var(--muted);
+    cursor: pointer; transition: all .2s;
+  }
+  .fbtn:hover { color: var(--text); }
+  .fbtn.active { background: var(--text); color: var(--bg); border-color: var(--text); }
+  .srt {
+    font-family: var(--mono); font-size: 11px;
+    background: var(--bg3); border: 1px solid var(--border2); color: var(--muted);
+    padding: 5px 10px; border-radius: var(--r); cursor: pointer;
+  }
+
+  /* TABLE HEADER */
+  .tbl-hdr {
+    display: grid;
+    grid-template-columns: 52px 100px 1fr 72px 64px 68px 72px;
+    gap: 6px; padding: 0 10px 8px;
+    font-family: var(--mono); font-size: 10px; color: var(--dim);
+    letter-spacing: .8px; text-transform: uppercase;
+    border-bottom: 1px solid var(--border); margin-bottom: 4px;
+  }
+  .tbl-hdr span:nth-child(n+3) { text-align: right; }
+  .tbl-hdr span:nth-child(3)   { text-align: left; }
+
+  /* STOCK ROW */
+  .row {
+    display: grid;
+    grid-template-columns: 52px 100px 1fr 72px 64px 68px 72px;
+    gap: 6px; align-items: center;
+    padding: 7px 10px; border-radius: var(--r);
+    transition: background .15s; margin-bottom: 2px;
+  }
+  .row:hover { background: var(--bg2); }
+
+  .r-ticker { font-family: var(--mono); font-size: 13px; font-weight: 700; }
+  .r-name   { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* BAR */
+  .r-bar { display: flex; align-items: center; }
+  .bar-track { flex: 1; height: 18px; background: rgba(255,255,255,.04); border-radius: 4px; overflow: hidden; }
+  .bar-fill  { height: 100%; border-radius: 4px; min-width: 2px; transition: width .5s cubic-bezier(.4,0,.2,1); }
+  .bar-fill.up { background: linear-gradient(90deg, rgba(255,77,77,.12), rgba(255,77,77,.32)); }
+  .bar-fill.dn { background: linear-gradient(90deg, rgba(77,159,255,.12), rgba(77,159,255,.32)); }
+
+  .r-weight  { font-family: var(--mono); font-size: 12px; color: var(--muted); text-align: right; }
+  .r-price   { font-family: var(--mono); font-size: 12px; color: var(--muted); text-align: right; }
+  .r-chg     { font-family: var(--mono); font-size: 13px; font-weight: 700; text-align: right; }
+  .r-chg.up  { color: var(--up); }
+  .r-chg.dn  { color: var(--dn); }
+  .r-contrib { font-family: var(--mono); font-size: 12px; font-weight: 700; text-align: right; }
+  .r-contrib.up { color: var(--up); }
+  .r-contrib.dn { color: var(--dn); }
+
+  /* STATES */
+  .loading { text-align: center; padding: 60px; color: var(--muted); font-family: var(--mono); font-size: 13px; }
+  .spin-big { display: block; width: 30px; height: 30px; border: 2px solid var(--border2); border-top-color: var(--up); border-radius: 50%; margin: 0 auto 14px; animation: rot .8s linear infinite; }
+  .err-box  { text-align: center; padding: 36px; background: var(--bg2); border-radius: var(--rl); border: 1px solid var(--up-bd); color: var(--up); font-family: var(--mono); font-size: 13px; }
+
+  .updated  { font-family: var(--mono); font-size: 10px; color: var(--dim); text-align: right; margin-bottom: 8px; }
+  .footer   { margin-top: 44px; padding-top: 18px; border-top: 1px solid var(--border); font-size: 11px; color: var(--dim); line-height: 1.8; }
+
+  @media (max-width: 640px) {
+    .etf-grid { grid-template-columns: 1fr; }
+    .tbl-hdr, .row { grid-template-columns: 48px 1fr 56px 60px; }
+    .tbl-hdr span:nth-child(2),
+    .tbl-hdr span:nth-child(3),
+    .tbl-hdr span:nth-child(5),
+    .row .r-name,
+    .row .r-bar,
+    .row .r-price { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<header class="hdr">
+  <div class="logo">
+    시발 <span class="acc">SOXL</span> 왜 올라요?
+    <span class="live">LIVE</span>
+  </div>
+  <div class="hdr-r">
+    <div class="countdown">
+      <span class="dot" id="dot"></span>
+      <span id="cntdwn">로딩 중...</span>
+    </div>
+    <button class="rbtn" id="rbtn" onclick="load(true)">
+      <svg id="rico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+        <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
+        <path d="M21 3v5h-5"/>
+        <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
+        <path d="M3 21v-5h5"/>
+      </svg>
+      새로고침
+    </button>
+  </div>
+</header>
+
+<main class="main">
+  <div id="sessionBadge"></div>
+
+  <div class="etf-grid">
+    <div class="etf-card" id="soxxCard">
+      <div class="etf-tag">iShares SOXX</div>
+      <div class="etf-lbl">SOXX · 현재가</div>
+      <div class="etf-price" id="soxxPrice">--</div>
+      <div class="etf-chg"   id="soxxChg">--</div>
+      <div class="etf-sub">Philadelphia Semiconductor ETF</div>
+    </div>
+    <div class="etf-card" id="soxlCard">
+      <div class="etf-tag">Direxion 3×</div>
+      <div class="etf-lbl">SOXL · 현재가</div>
+      <div class="etf-price" id="soxlPrice">--</div>
+      <div class="etf-chg"   id="soxlChg">--</div>
+      <div class="etf-sub">SOXX 3배 레버리지 ETF</div>
+    </div>
+  </div>
+
+  <div class="verdict" id="verdict">
+    <div class="vi">⏳</div>
+    <div><div class="vt">데이터 로딩 중...</div><div class="vs">잠시만 기다려주세요.</div></div>
+  </div>
+
+  <div class="toolbar">
+    <span class="sec-title">종목별 기여도</span>
+    <button class="fbtn active" id="btn-all"  onclick="setFilter('all')">전체</button>
+    <button class="fbtn"        id="btn-up"   onclick="setFilter('up')">상승 🔴</button>
+    <button class="fbtn"        id="btn-dn"   onclick="setFilter('dn')">하락 🔵</button>
+    <select class="srt" id="srt" onchange="renderChart()">
+      <option value="contrib">기여도순</option>
+      <option value="chg">등락률순</option>
+      <option value="weight">비중순</option>
+    </select>
+  </div>
+
+  <div class="updated" id="updated"></div>
+
+  <div class="tbl-hdr">
+    <span>티커</span>
+    <span>종목명</span>
+    <span>기여도 바</span>
+    <span>비중</span>
+    <span>현재가</span>
+    <span>등락률</span>
+    <span>기여도</span>
+  </div>
+
+  <div id="chart">
+    <div class="loading"><span class="spin-big"></span>주가 긁어오는 중...</div>
+  </div>
+
+  <div class="footer">
+    * 기여도 = 종목 등락률 × SOXX 비중 (추정값). 실제 ETF 계산과 오차 있을 수 있음.<br>
+    * 비중은 iShares 공식 사이트에서 매일 1회 자동 갱신. 분기 리밸런싱 자동 반영.<br>
+    * 프리장(Pre) · 정규장(Regular) · 애프터장(Post) 모두 지원. 5분마다 자동 갱신.<br>
+    * SOXL은 일별 3× 레버리지이므로 장기 수익률이 SOXX×3과 다를 수 있음.
+  </div>
+</main>
+
+<script>
+let allData = [], filter = 'all', nextAt = 0, timer = null;
+
+function marketSession() {
+  // 미국 동부시간 기준 (ET = UTC-4 summer / UTC-5 winter)
+  const now = new Date();
+  const etOffset = -4; // EDT (여름 기준, 겨울엔 -5)
+  const et = new Date(now.getTime() + (now.getTimezoneOffset() + etOffset * 60) * 60000);
+  const h = et.getHours(), m = et.getMinutes(), day = et.getDay();
+  const t = h * 60 + m;
+  if (day === 0 || day === 6) return 'closed';
+  if (t >= 240 && t < 570)  return 'pre';    // 04:00~09:30
+  if (t >= 570 && t < 960)  return 'reg';    // 09:30~16:00
+  if (t >= 960 && t < 1200) return 'post';   // 16:00~20:00
+  return 'closed';
+}
+
+function renderSession() {
+  const s = marketSession();
+  const map = {
+    pre:    ['🌅 프리장 (Pre-Market 04:00~09:30 ET)', 'pre'],
+    reg:    ['🟢 정규장 (Regular 09:30~16:00 ET)',    'reg'],
+    post:   ['🌙 애프터장 (After-Hours 16:00~20:00 ET)', 'post'],
+    closed: ['⏸ 장 마감 (Closed)',                   'closed'],
+  };
+  const [label, cls] = map[s];
+  document.getElementById('sessionBadge').innerHTML =
+    `<div class="session-badge ${cls}">${label}</div>`;
+}
+
+async function load(manual = false) {
+  const btn = document.getElementById('rbtn');
+  btn.classList.add('spin'); btn.disabled = true;
+  try {
+    const res = await fetch('/api/data');
+    if (!res.ok) throw new Error('서버 오류 ' + res.status);
+    const d = await res.json();
+    if (d.error) throw new Error(d.error);
+
+    renderETF('soxx', d.soxx);
+    renderETF('soxl', d.soxl);
+    allData = d.holdings || [];
+    renderVerdict(d.soxx);
+    renderChart();
+
+    const ts = d.updated_at ? new Date(d.updated_at * 1000) : new Date();
+    const wts = d.weight_updated_at ? new Date(d.weight_updated_at * 1000) : null;
+    let updTxt = '주가 갱신: ' + ts.toLocaleTimeString('ko-KR');
+    if (wts) updTxt += '  |  비중 갱신: ' + wts.toLocaleDateString('ko-KR');
+    document.getElementById('updated').textContent = updTxt;
+
+    nextAt = (d.updated_at || Math.floor(Date.now()/1000)) + 300;
+    startCountdown();
+  } catch(e) {
+    document.getElementById('chart').innerHTML =
+      `<div class="err-box">⚠️ ${e.message}<br><small>새로고침 버튼을 눌러주세요</small></div>`;
+  }
+  btn.classList.remove('spin'); btn.disabled = false;
+}
+
+function renderETF(id, data) {
+  const c = data.changePercent || 0, up = c >= 0;
+  const cls = up ? 'up' : 'dn';
+  document.getElementById(id+'Price').textContent = '$' + (data.price||0).toFixed(2);
+  const el = document.getElementById(id+'Chg');
+  el.textContent = (up?'+':'') + c.toFixed(2) + '%';
+  el.className = 'etf-chg ' + cls;
+  document.getElementById(id+'Card').className = 'etf-card ' + cls;
+}
+
+function renderVerdict(soxx) {
+  if (!allData.length) return;
+  const ups  = allData.filter(d => d.contribution > 0).sort((a,b) => b.contribution - a.contribution);
+  const dns  = allData.filter(d => d.contribution < 0).sort((a,b) => a.contribution - b.contribution);
+  const tot  = allData.reduce((s,d) => s + d.contribution, 0);
+  const up   = tot >= 0;
+  let icon, title, sub;
+  if (up) {
+    icon  = '🚀';
+    const t = ups[0], drag = dns[0];
+    title = t ? `<b>${t.ticker}</b>(${t.name}) +${t.changePercent.toFixed(1)}% 덕에 올라요` : '전반적 상승';
+    sub   = drag ? `${drag.ticker}(${drag.changePercent.toFixed(1)}%)는 발목 잡는 중` : '하락 종목 없음';
+  } else {
+    icon  = '💀';
+    const t = dns[0], hero = ups[0];
+    title = t ? `<b>${t.ticker}</b>(${t.name}) ${t.changePercent.toFixed(1)}% 때문에 내려요` : '전반적 하락';
+    sub   = hero ? `${hero.ticker}(+${hero.changePercent.toFixed(1)}%)은 혼자 버티는 중` : '상승 종목 없음';
+  }
+  const cls = up ? 'up' : 'dn';
+  document.getElementById('verdict').className = 'verdict ' + cls;
+  document.getElementById('verdict').innerHTML = `
+    <div class="vi">${icon}</div>
+    <div>
+      <div class="vt">${title}</div>
+      <div class="vs">${sub}</div>
+      <div class="vc ${cls}">추정 기여도 합 ${tot>=0?'+':''}${tot.toFixed(3)}%p &nbsp;·&nbsp; 상승 ${ups.length}종 / 하락 ${dns.length}종</div>
+    </div>`;
+}
+
+function renderChart() {
+  if (!allData.length) return;
+  const srt = document.getElementById('srt').value;
+  let data = [...allData];
+  if (filter === 'up') data = data.filter(d => d.contribution >= 0);
+  if (filter === 'dn') data = data.filter(d => d.contribution <  0);
+  if (srt === 'chg')    data.sort((a,b) => Math.abs(b.changePercent) - Math.abs(a.changePercent));
+  if (srt === 'weight') data.sort((a,b) => b.weight - a.weight);
+
+  if (!data.length) {
+    document.getElementById('chart').innerHTML = '<div class="loading">표시할 종목이 없습니다.</div>';
+    return;
+  }
+  const maxAbs = Math.max(...allData.map(d => Math.abs(d.contribution)), 0.001);
+  document.getElementById('chart').innerHTML = data.map(d => {
+    const up  = d.contribution >= 0;
+    const cls = up ? 'up' : 'dn';
+    const w   = Math.min(Math.abs(d.contribution) / maxAbs * 100, 100).toFixed(1);
+    const sgn = up ? '+' : '';
+    return `<div class="row">
+      <div class="r-ticker">${d.ticker}</div>
+      <div class="r-name">${d.name}</div>
+      <div class="r-bar"><div class="bar-track"><div class="bar-fill ${cls}" style="width:${w}%"></div></div></div>
+      <div class="r-weight">${(d.weight||0).toFixed(2)}%</div>
+      <div class="r-price">$${(d.price||0).toFixed(2)}</div>
+      <div class="r-chg ${cls}">${sgn}${(d.changePercent||0).toFixed(2)}%</div>
+      <div class="r-contrib ${cls}">${sgn}${(d.contribution||0).toFixed(3)}%p</div>
+    </div>`;
+  }).join('');
+}
+
+function setFilter(f) {
+  filter = f;
+  ['all','up','dn'].forEach(x =>
+    document.getElementById('btn-'+x).classList.toggle('active', x === f));
+  renderChart();
+}
+
+function startCountdown() {
+  if (timer) clearInterval(timer);
+  timer = setInterval(() => {
+    const s = nextAt - Math.floor(Date.now()/1000);
+    if (s <= 0) { clearInterval(timer); load(); return; }
+    document.getElementById('cntdwn').textContent =
+      `다음 갱신 ${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;
+  }, 1000);
+}
+
+renderSession();
+setInterval(renderSession, 60000);
+load();
+</script>
+</body>
+</html>
