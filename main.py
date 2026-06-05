@@ -225,3 +225,16 @@ def index():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=False)
+
+# 수동 새로고침 전용 라우트 — 즉시 데이터 수집 후 반환
+@app.route("/api/refresh", methods=["POST"])
+def api_refresh():
+    try:
+        refresh_cache()
+        with CACHE_LOCK:
+            data = CACHE["data"]
+        resp = jsonify(data)
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500

@@ -362,7 +362,10 @@ async function load(manual = false) {
 
   const t0 = Date.now();
   try {
-    const res = await fetch('/api/data');
+    // 수동 새로고침: 서버에서 즉시 데이터 수집
+    // 자동 갱신(카운트다운): 캐시된 데이터 반환
+    const res = await fetch(manual ? '/api/refresh' : '/api/data',
+                            { method: manual ? 'POST' : 'GET' });
     if (!res.ok) throw new Error('서버 오류 ' + res.status);
     const d = await res.json();
     if (d.error) throw new Error(d.error);
