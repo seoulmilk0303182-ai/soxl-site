@@ -1,8 +1,8 @@
 """
-시발 SOXL 왜 올라요? — 백엔드 v4
-- stockanalysis.com HTML 테이블 직접 파싱 (BeautifulSoup 불필요, re만 사용)
+시발 SOXL 왜 올라요? — 백엔드 v5
+- 백그라운드 5분 자동갱신 (타이머 버그 수정)
 - Finnhub 실시간 주가 (프리/애프터 포함)
-- 5분 주가 갱신 / 하루 1회 비중 갱신
+- stockanalysis HTML 파싱으로 SOXX 비중 (실패 시 fallback)
 """
 
 import time
@@ -16,7 +16,6 @@ FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY", "")
 
 app = Flask(__name__, static_folder="static")
 
-# ── Fallback 비중 (스크래핑 실패 시) — 2026년 5월 기준 ──────────
 FALLBACK_HOLDINGS = [
     {"ticker": "MU",    "name": "마이크론",             "weight": 11.04},
     {"ticker": "AMD",   "name": "AMD",                  "weight": 9.51},
@@ -43,16 +42,22 @@ FALLBACK_HOLDINGS = [
     {"ticker": "ENTG",  "name": "앤테그리스",           "weight": 1.06},
     {"ticker": "ASX",   "name": "ASE Technology",        "weight": 1.06},
     {"ticker": "UMC",   "name": "UMC",                  "weight": 0.83},
+    {"ticker": "SWKS",  "name": "스카이웍스",           "weight": 0.70},
+    {"ticker": "QRVO",  "name": "Qorvo",                "weight": 0.60},
+    {"ticker": "STM",   "name": "ST마이크로",           "weight": 0.55},
+    {"ticker": "WOLF",  "name": "울프스피드",           "weight": 0.40},
+    {"ticker": "AMKR",  "name": "Amkor",                "weight": 0.35},
 ]
 
 NAME_MAP = {h["ticker"]: h["name"] for h in FALLBACK_HOLDINGS}
 
-CACHE        = {"data": None}
-CACHE_LOCK   = threading.Lock()
-CACHE_TTL    = 300
-WEIGHT_TTL   = 86400
+CACHE      = {"data": None}
+CACHE_LOCK = threading.Lock()
+CACHE_TTL  = 300   # 주가 5분
+WEIGHT_TTL = 86400 # 비중 하루
 
 _weight_cache = {"holdings": None, "updated_at": 0}
+
 
 # ── 비중 스크래핑 ────────────────────────────────────────────────
 def fetch_weights_stockanalysis():
@@ -70,85 +75,65 @@ def fetch_weights_stockanalysis():
     r.raise_for_status()
     html = r.text
 
-    # <tbody> 안의 <tr> 행들 추출
     tbody = re.search(r'<tbody[^>]*>(.*?)</tbody>', html, re.S)
     if not tbody:
         raise ValueError("tbody not found")
 
     rows = re.findall(r'<tr[^>]*>(.*?)</tr>', tbody.group(1), re.S)
-    if not rows:
-        raise ValueError("tr rows not found")
-
     holdings = []
     for row in rows:
-        # 각 <td> 셀 추출
         cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.S)
         if len(cells) < 4:
             continue
-
-        # 티커: 두 번째 셀에서 링크 텍스트 or 텍스트
-        ticker_cell = re.sub(r'<[^>]+>', '', cells[1]).strip()
-        if not ticker_cell or ticker_cell == 'Symbol':
+        ticker = re.sub(r'<[^>]+>', '', cells[1]).strip().upper()
+        if not ticker or ticker == 'SYMBOL':
             continue
-
-        # 비중: 세 번째 셀 (% Weight)
-        weight_raw = re.sub(r'<[^>]+>', '', cells[3]).strip().replace('%', '').replace(',', '')
+        weight_raw = re.sub(r'<[^>]+>', '', cells[3]).strip().replace('%','').replace(',','')
         try:
             weight = float(weight_raw)
         except ValueError:
             continue
         if weight <= 0:
             continue
-
         holdings.append({
-            "ticker": ticker_cell.upper(),
-            "name":   NAME_MAP.get(ticker_cell.upper(), ticker_cell),
+            "ticker": ticker,
+            "name":   NAME_MAP.get(ticker, ticker),
             "weight": round(weight, 4),
         })
 
     if len(holdings) < 10:
-        raise ValueError(f"파싱된 종목 수 부족: {len(holdings)}")
+        raise ValueError(f"종목 수 부족: {len(holdings)}")
 
     holdings.sort(key=lambda x: x["weight"], reverse=True)
-    print(f"[{time.strftime('%H:%M:%S')}] 비중 {len(holdings)}개 갱신 완료 (stockanalysis)")
+    print(f"[{time.strftime('%H:%M:%S')}] 비중 {len(holdings)}개 갱신 (stockanalysis)")
     return holdings
 
 
 def get_holdings():
     now = time.time()
-    if (
-        _weight_cache["holdings"] is None
-        or now - _weight_cache["updated_at"] > WEIGHT_TTL
-    ):
+    if _weight_cache["holdings"] is None or now - _weight_cache["updated_at"] > WEIGHT_TTL:
         try:
             _weight_cache["holdings"]   = fetch_weights_stockanalysis()
             _weight_cache["updated_at"] = now
         except Exception as e:
-            print(f"[WARN] 비중 스크래핑 실패: {e} → fallback 사용")
+            print(f"[WARN] 비중 실패: {e} → fallback")
             if _weight_cache["holdings"] is None:
                 _weight_cache["holdings"]   = FALLBACK_HOLDINGS
                 _weight_cache["updated_at"] = now
     return _weight_cache["holdings"]
 
 
-# ── 실시간 주가 (Finnhub) ────────────────────────────────────────
+# ── 주가 조회 ────────────────────────────────────────────────────
 def fetch_single(ticker):
     try:
-        url = (
-            f"https://finnhub.io/api/v1/quote"
-            f"?symbol={ticker}&token={FINNHUB_API_KEY}"
-        )
-        d = requests.get(url, timeout=10).json()
-        current = d.get("c", 0)
-        prev    = d.get("pc", current) or current
-        if not current:
+        url = f"https://finnhub.io/api/v1/quote?symbol={ticker}&token={FINNHUB_API_KEY}"
+        d   = requests.get(url, timeout=10).json()
+        cur  = d.get("c", 0)
+        prev = d.get("pc", cur) or cur
+        if not cur:
             return {"price": 0, "prevClose": 0, "changePercent": 0}
-        chg = ((current - prev) / prev * 100) if prev else 0
-        return {
-            "price":         round(current, 2),
-            "prevClose":     round(prev, 2),
-            "changePercent": round(chg, 4),
-        }
+        chg = ((cur - prev) / prev * 100) if prev else 0
+        return {"price": round(cur, 2), "prevClose": round(prev, 2), "changePercent": round(chg, 4)}
     except Exception as e:
         print(f"  [{ticker}] 오류: {e}")
         return {"price": 0, "prevClose": 0, "changePercent": 0}
@@ -156,12 +141,12 @@ def fetch_single(ticker):
 
 # ── 캐시 갱신 ────────────────────────────────────────────────────
 def refresh_cache():
+    t0 = time.time()
     print(f"[{time.strftime('%H:%M:%S')}] 주가 갱신 시작...")
     holdings    = get_holdings()
     all_tickers = ["SOXX", "SOXL"] + [h["ticker"] for h in holdings]
 
     results = {}
-
     def _fetch(t):
         results[t] = fetch_single(t)
 
@@ -188,11 +173,15 @@ def refresh_cache():
 
     soxx = etf("SOXX")
     soxl = etf("SOXL")
+
+    # ★ next_refresh_at을 서버가 직접 계산해서 내려줌 → 프론트 타이머 오차 없음
+    now = int(time.time())
     data = {
         "soxx":              soxx,
         "soxl":              soxl,
         "holdings":          holding_data,
-        "updated_at":        int(time.time()),
+        "updated_at":        now,
+        "next_refresh_at":   now + CACHE_TTL,        # ← 핵심 추가
         "weight_updated_at": int(_weight_cache["updated_at"]),
     }
     with CACHE_LOCK:
@@ -201,23 +190,25 @@ def refresh_cache():
     print(
         f"[{time.strftime('%H:%M:%S')}] 갱신 완료 ✓  "
         f"SOXX {soxx['changePercent']:+.2f}%  "
-        f"SOXL {soxl['changePercent']:+.2f}%"
+        f"SOXL {soxl['changePercent']:+.2f}%  "
+        f"({len(holding_data)}종목, {time.time()-t0:.1f}s)"
     )
 
 
+# ── 백그라운드 워커 ── 시작 직후 1회 갱신, 이후 5분 간격 ────────
 def background_worker():
     while True:
+        time.sleep(CACHE_TTL)   # ★ 먼저 대기 (최초 갱신은 메인에서 이미 함)
         try:
             refresh_cache()
         except Exception as e:
             print(f"[ERROR] {e}")
-        time.sleep(CACHE_TTL)
 
-
-refresh_cache()
+refresh_cache()  # 서버 시작 시 1회 즉시 실행
 threading.Thread(target=background_worker, daemon=True).start()
 
 
+# ── Flask 라우트 ─────────────────────────────────────────────────
 @app.route("/api/data")
 def api_data():
     with CACHE_LOCK:
@@ -228,11 +219,9 @@ def api_data():
     resp.headers["Cache-Control"] = "no-cache"
     return resp
 
-
 @app.route("/")
 def index():
     return send_from_directory("static", "index.html")
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=False)
