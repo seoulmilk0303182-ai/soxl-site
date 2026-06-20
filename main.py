@@ -165,6 +165,47 @@ def fetch_prev_close(ticker):
         return 0
 
 
+# ── 미국 장 운영 상태 조회 ────────────────────────────────────────
+def fetch_us_market_status():
+    """
+    GET /api/v1/market-calendar/US
+    현재 시각이 어느 세션(day/pre/regular/after/closed)인지 판단.
+    휴장이면 4세션 모두 null.
+    """
+    try:
+        resp = requests.get(
+            f"{TOSS_BASE_URL}/api/v1/market-calendar/US",
+            headers=auth_headers(),
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return "unknown"
+        today = resp.json().get("result", {}).get("today", {})
+
+        import datetime
+        now_iso = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
+
+        def in_session(session):
+            if not session:
+                return False
+            start = datetime.datetime.fromisoformat(session["startTime"])
+            end   = datetime.datetime.fromisoformat(session["endTime"])
+            return start <= now_iso <= end
+
+        if in_session(today.get("regularMarket")):
+            return "regular"
+        if in_session(today.get("preMarket")):
+            return "pre"
+        if in_session(today.get("afterMarket")):
+            return "after"
+        if in_session(today.get("dayMarket")):
+            return "day"
+        return "closed"
+    except Exception as e:
+        print(f"[WARN] 장 운영 상태 조회 실패: {e}")
+        return "unknown"
+
+
 # ── 캐시 갱신 ────────────────────────────────────────────────────
 def refresh_cache():
     t0 = time.time()
@@ -172,6 +213,8 @@ def refresh_cache():
 
     holdings    = FALLBACK_HOLDINGS
     all_tickers = ["SOXX", "SOXL"] + [h["ticker"] for h in holdings]
+
+    market_status = fetch_us_market_status()
 
     try:
         prices = fetch_all_prices(all_tickers)
@@ -190,7 +233,11 @@ def refresh_cache():
     def quote(t):
         price = prices.get(t, 0)
         prev  = prev_closes.get(t, 0) or price
-        chg   = ((price - prev) / prev * 100) if prev else 0
+        # 장 마감(closed) 상태면 현재가도 전일 종가 기준으로 표시
+        # (lastPrice 가 휴장 중 갱신되지 않는 거래소 특성을 명시적으로 보정)
+        if market_status == "closed" and prev:
+            price = prev
+        chg = ((price - prev) / prev * 100) if prev else 0
         return {"price": round(price, 2), "prevClose": round(prev, 2), "changePercent": round(chg, 4)}
 
     def etf(t):
@@ -221,12 +268,14 @@ def refresh_cache():
         "updated_at":        now,
         "next_refresh_at":   now + CACHE_TTL,
         "weight_updated_at": now,
+        "market_status":     market_status,
     }
     with CACHE_LOCK:
         CACHE["data"] = data
 
     print(
         f"[{time.strftime('%H:%M:%S')}] 갱신 완료 ✓  "
+        f"[{market_status}]  "
         f"SOXX {soxx['changePercent']:+.2f}%  "
         f"SOXL {soxl['changePercent']:+.2f}%  "
         f"({len(holding_data)}종목, {time.time()-t0:.1f}s)"
@@ -234,12 +283,22 @@ def refresh_cache():
 
 
 def background_worker():
+    """
+    5분(CACHE_TTL)마다 갱신하되, time.sleep(300) 한 방에 의존하지 않고
+    10초 간격으로 깨어나 '갱신할 때가 됐는지' 체크합니다.
+    → 슬립/절전 등으로 인한 누락 없이 항상 정확한 시점에 갱신됩니다.
+    """
     while True:
-        time.sleep(CACHE_TTL)
-        try:
-            refresh_cache()
-        except Exception as e:
-            print(f"[ERROR] {e}")
+        time.sleep(10)
+        with CACHE_LOCK:
+            data = CACHE["data"]
+        if data is None:
+            continue
+        if time.time() >= data.get("next_refresh_at", 0):
+            try:
+                refresh_cache()
+            except Exception as e:
+                print(f"[ERROR] {e}")
 
 refresh_cache()
 threading.Thread(target=background_worker, daemon=True).start()

@@ -388,14 +388,20 @@ function marketSession() {
   if (t >= 960 && t < 1200)  return 'post';
   return 'closed';
 }
-function renderSession() {
+function renderSession(serverStatus) {
   const map = {
-    pre:    ['🌅 프리장 (Pre-Market 04:00~09:30 ET)',      'pre'],
-    reg:    ['🟢 정규장 (Regular 09:30~16:00 ET)',          'reg'],
-    post:   ['🌙 애프터장 (After-Hours 16:00~20:00 ET)',   'post'],
-    closed: ['⏸ 장 마감 (Closed)',                         'closed'],
+    pre:     ['🌅 프리장 (Pre-Market)',           'pre'],
+    day:     ['🌤 데이마켓 (Day Market)',          'pre'],
+    regular: ['🟢 정규장 (Regular Hours)',         'reg'],
+    reg:     ['🟢 정규장 (Regular Hours)',         'reg'],
+    after:   ['🌙 애프터장 (After-Hours)',         'post'],
+    post:    ['🌙 애프터장 (After-Hours)',         'post'],
+    closed:  ['⏸ 장 마감 — 전일 종가 기준',        'closed'],
+    unknown: ['⏸ 장 마감 — 전일 종가 기준',        'closed'],
   };
-  const [label, cls] = map[marketSession()];
+  // 서버가 market_status 를 내려주면 그걸 우선 사용 (더 정확함)
+  const key = serverStatus || marketSession();
+  const [label, cls] = map[key] || map.closed;
   document.getElementById('sessionBadge').innerHTML =
     `<div class="session-badge ${cls}">${label}</div>`;
 }
@@ -423,10 +429,14 @@ async function load(manual = false) {
     renderVerdict();
     renderChart();
     applyTheme(soxlUp);  // ← 데이터 받은 후 테마 적용 (초기 하드코딩 없음)
+    renderSession(d.market_status);  // ← 서버가 판단한 정확한 장 상태 반영
 
     const ts  = d.updated_at        ? new Date(d.updated_at * 1000)        : new Date();
     const wts = d.weight_updated_at ? new Date(d.weight_updated_at * 1000) : null;
     let updTxt = '주가 갱신: ' + ts.toLocaleTimeString('ko-KR');
+    if (d.market_status === 'closed' || d.market_status === 'unknown') {
+      updTxt += '  ·  장 마감 — 전일 종가 표시 중';
+    }
     if (wts) updTxt += '  ·  비중 갱신: ' + wts.toLocaleDateString('ko-KR');
     document.getElementById('updated').textContent = updTxt;
 
@@ -565,6 +575,15 @@ function startCountdown() {
       `다음 갱신 ${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;
   }, 1000);
 }
+
+// 브라우저가 백그라운드 탭의 setInterval 을 느리게 돌리는 경우가 있어,
+// 탭이 다시 보일 때 즉시 갱신 시각을 체크해 누락을 보정합니다.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && nextAt > 0) {
+    const s = nextAt - Math.floor(Date.now() / 1000);
+    if (s <= 0) load();
+  }
+});
 
 // ── 초기화 ──────────────────────────────────────────────────────
 renderSession();
