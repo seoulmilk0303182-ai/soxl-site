@@ -252,6 +252,26 @@
     .tbl-hdr span:nth-child(2), .tbl-hdr span:nth-child(3),
     .tbl-hdr span:nth-child(5), .row .r-name, .row .r-bar, .row .r-price { display: none; }
     .refresh-status { display: none; }
+
+    /* 헤더: 좁은 화면에서 로고/버튼이 겹치거나 잘리지 않도록 2줄로 재배치 */
+    .hdr {
+      height: auto;
+      flex-wrap: wrap;
+      padding: 10px 16px;
+      gap: 8px;
+      row-gap: 10px;
+    }
+    .logo { font-size: 14px; flex-wrap: wrap; row-gap: 4px; }
+    .hdr-r { width: 100%; justify-content: space-between; }
+    .countdown { font-size: 11px; }
+    /* 터치 타겟을 키워 모바일에서 확실히 눌리도록 */
+    .rbtn {
+      padding: 9px 16px;
+      font-size: 13px;
+      min-height: 38px;
+      -webkit-tap-highlight-color: rgba(255,255,255,0.15);
+      touch-action: manipulation;
+    }
   }
 </style>
 </head>

@@ -132,11 +132,29 @@ def fetch_all_prices(tickers):
         timeout=15,
     )
     if resp.status_code != 200:
-        raise RuntimeError(f"현재가 조회 실패 ({resp.status_code}): {resp.text[:200]}")
+        raise RuntimeError(f"현재가 조회 실패 ({resp.status_code}): {resp.text[:300]}")
 
     d = resp.json()
     result = d.get("result", [])
-    return {item["symbol"]: float(item["lastPrice"]) for item in result if item.get("lastPrice")}
+
+    # ⚠️ 디버그: 응답이 비어있거나 예상과 다르면 원본을 그대로 출력
+    if not result:
+        print(f"[WARN] /api/v1/prices 응답에 result가 비어있음. 원본: {str(d)[:300]}")
+    else:
+        print(f"[DEBUG] /api/v1/prices 응답 {len(result)}건 수신. 샘플: {result[0]}")
+
+    prices = {}
+    for item in result:
+        try:
+            prices[item["symbol"]] = float(item["lastPrice"])
+        except (KeyError, ValueError, TypeError) as e:
+            print(f"[WARN] 가격 파싱 실패: {item} ({e})")
+
+    missing = set(tickers) - set(prices.keys())
+    if missing:
+        print(f"[WARN] 응답에 없는 심볼: {sorted(missing)}")
+
+    return prices
 
 
 # ── 전일 종가 조회 (일봉 캔들, 종목당 1콜) ───────────────────────
@@ -153,12 +171,14 @@ def fetch_prev_close(ticker):
             timeout=10,
         )
         if resp.status_code != 200:
+            print(f"  [{ticker}] candles 실패 ({resp.status_code}): {resp.text[:150]}")
             return 0
         candles = resp.json().get("result", {}).get("candles", [])
         if len(candles) >= 2:
             return float(candles[1]["closePrice"])
         elif len(candles) == 1:
             return float(candles[0]["closePrice"])
+        print(f"  [{ticker}] candles 응답에 봉이 없음")
         return 0
     except Exception as e:
         print(f"  [{ticker}] 전일종가 조회 오류: {e}")
@@ -219,7 +239,9 @@ def refresh_cache():
     try:
         prices = fetch_all_prices(all_tickers)
     except Exception as e:
+        import traceback
         print(f"[ERROR] 현재가 일괄 조회 실패: {e}")
+        traceback.print_exc()
         prices = {}
 
     prev_closes = {}
