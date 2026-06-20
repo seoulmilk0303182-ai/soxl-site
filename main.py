@@ -1,21 +1,44 @@
 """
-시발 SOXL 왜 올라요? — 백엔드 v5
-- 백그라운드 5분 자동갱신 (타이머 버그 수정)
-- Finnhub 실시간 주가 (프리/애프터 포함)
-- stockanalysis HTML 파싱으로 SOXX 비중 (실패 시 fallback)
+시발 SOXL 왜 올라요? — 백엔드 v7
+- 토스증권 공식 Open API (OpenAPI 3.1 스펙 기준)
+- GET /api/v1/prices?symbols=... 로 30개 종목 한 번에 조회 (최대 200개 지원)
+- GET /api/v1/candles 로 전일 종가 조회 (등락률 계산용)
+- 5분 주가 갱신
+
+★★★ 중요: API 키 설정 방법 ★★★
+절대 이 파일에 키를 직접 적지 마세요.
+
+[Windows CMD]
+set TOSS_CLIENT_ID=발급받은_ID
+set TOSS_CLIENT_SECRET=발급받은_SECRET
+python main.py
+
+[Windows PowerShell]
+$env:TOSS_CLIENT_ID="발급받은_ID"
+$env:TOSS_CLIENT_SECRET="발급받은_SECRET"
+python main.py
+
+⚠️ 키를 어딘가에 노출한 적이 있다면 토스증권 앱에서 즉시 재발급하세요.
 """
 
 import time
 import threading
 import os
-import re
 from flask import Flask, jsonify, send_from_directory
 import requests
 
-FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY", "")
+TOSS_CLIENT_ID     = os.environ.get("TOSS_CLIENT_ID", "")
+TOSS_CLIENT_SECRET = os.environ.get("TOSS_CLIENT_SECRET", "")
+TOSS_BASE_URL       = "https://openapi.tossinvest.com"
+
+if not TOSS_CLIENT_ID or not TOSS_CLIENT_SECRET:
+    print("=" * 60)
+    print("[WARN] TOSS_CLIENT_ID / TOSS_CLIENT_SECRET 환경변수가 비어있습니다.")
+    print("=" * 60)
 
 app = Flask(__name__, static_folder="static")
 
+# ── SOXX 구성종목 30개 (비중은 추정값) ───────────────────────────
 FALLBACK_HOLDINGS = [
     {"ticker": "MU",    "name": "마이크론",             "weight": 11.04},
     {"ticker": "AMD",   "name": "AMD",                  "weight": 9.51},
@@ -49,123 +72,139 @@ FALLBACK_HOLDINGS = [
     {"ticker": "AMKR",  "name": "Amkor",                "weight": 0.35},
 ]
 
-NAME_MAP = {h["ticker"]: h["name"] for h in FALLBACK_HOLDINGS}
-
 CACHE      = {"data": None}
 CACHE_LOCK = threading.Lock()
-CACHE_TTL  = 300   # 주가 5분
-WEIGHT_TTL = 86400 # 비중 하루
+CACHE_TTL  = 300
 
-_weight_cache = {"holdings": None, "updated_at": 0}
+# ── OAuth 토큰 캐시 ───────────────────────────────────────────────
+_token_cache = {"access_token": None, "expires_at": 0}
+_token_lock  = threading.Lock()
 
+def get_access_token():
+    """
+    POST /oauth2/token
+    공식 스펙: body(form-urlencoded)에 grant_type, client_id, client_secret 전달.
+    """
+    with _token_lock:
+        now = time.time()
+        if _token_cache["access_token"] and now < _token_cache["expires_at"] - 300:
+            return _token_cache["access_token"]
 
-# ── 비중 스크래핑 ────────────────────────────────────────────────
-def fetch_weights_stockanalysis():
-    url = "https://stockanalysis.com/etf/soxx/holdings/"
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-    r = requests.get(url, headers=headers, timeout=20)
-    r.raise_for_status()
-    html = r.text
+        if not TOSS_CLIENT_ID or not TOSS_CLIENT_SECRET:
+            raise RuntimeError("TOSS_CLIENT_ID/SECRET 환경변수가 설정되지 않았습니다.")
 
-    tbody = re.search(r'<tbody[^>]*>(.*?)</tbody>', html, re.S)
-    if not tbody:
-        raise ValueError("tbody not found")
+        resp = requests.post(
+            f"{TOSS_BASE_URL}/oauth2/token",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            data={
+                "grant_type":    "client_credentials",
+                "client_id":     TOSS_CLIENT_ID,
+                "client_secret": TOSS_CLIENT_SECRET,
+            },
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"토큰 발급 실패 ({resp.status_code}): {resp.text[:200]}")
 
-    rows = re.findall(r'<tr[^>]*>(.*?)</tr>', tbody.group(1), re.S)
-    holdings = []
-    for row in rows:
-        cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.S)
-        if len(cells) < 4:
-            continue
-        ticker = re.sub(r'<[^>]+>', '', cells[1]).strip().upper()
-        if not ticker or ticker == 'SYMBOL':
-            continue
-        weight_raw = re.sub(r'<[^>]+>', '', cells[3]).strip().replace('%','').replace(',','')
-        try:
-            weight = float(weight_raw)
-        except ValueError:
-            continue
-        if weight <= 0:
-            continue
-        holdings.append({
-            "ticker": ticker,
-            "name":   NAME_MAP.get(ticker, ticker),
-            "weight": round(weight, 4),
-        })
-
-    if len(holdings) < 10:
-        raise ValueError(f"종목 수 부족: {len(holdings)}")
-
-    holdings.sort(key=lambda x: x["weight"], reverse=True)
-    print(f"[{time.strftime('%H:%M:%S')}] 비중 {len(holdings)}개 갱신 (stockanalysis)")
-    return holdings
+        d = resp.json()
+        _token_cache["access_token"] = d["access_token"]
+        _token_cache["expires_at"]   = now + d.get("expires_in", 86400)
+        print(f"[{time.strftime('%H:%M:%S')}] 토스증권 토큰 발급 완료 (유효 {d.get('expires_in',86400)}초)")
+        return _token_cache["access_token"]
 
 
-def get_holdings():
-    now = time.time()
-    if _weight_cache["holdings"] is None or now - _weight_cache["updated_at"] > WEIGHT_TTL:
-        try:
-            _weight_cache["holdings"]   = fetch_weights_stockanalysis()
-            _weight_cache["updated_at"] = now
-        except Exception as e:
-            print(f"[WARN] 비중 실패: {e} → fallback")
-            if _weight_cache["holdings"] is None:
-                _weight_cache["holdings"]   = FALLBACK_HOLDINGS
-                _weight_cache["updated_at"] = now
-    return _weight_cache["holdings"]
+def auth_headers():
+    return {"Authorization": f"Bearer {get_access_token()}"}
 
 
-# ── 주가 조회 ────────────────────────────────────────────────────
-def fetch_single(ticker):
+# ── 현재가 일괄 조회 (최대 200개, 콤마 구분) ─────────────────────
+def fetch_all_prices(tickers):
+    """
+    GET /api/v1/prices?symbols=NVDA,AMD,...
+    응답: { result: [ {symbol, timestamp, lastPrice, currency}, ... ] }
+    30개 종목을 단 1번의 호출로 가져옵니다.
+    """
+    symbols_str = ",".join(tickers)
+    resp = requests.get(
+        f"{TOSS_BASE_URL}/api/v1/prices",
+        params={"symbols": symbols_str},
+        headers=auth_headers(),
+        timeout=15,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"현재가 조회 실패 ({resp.status_code}): {resp.text[:200]}")
+
+    d = resp.json()
+    result = d.get("result", [])
+    return {item["symbol"]: float(item["lastPrice"]) for item in result if item.get("lastPrice")}
+
+
+# ── 전일 종가 조회 (일봉 캔들, 종목당 1콜) ───────────────────────
+def fetch_prev_close(ticker):
+    """
+    GET /api/v1/candles?symbol=AAPL&interval=1d&count=2
+    가장 최근 2개의 일봉 중 이전 봉의 종가를 전일 종가로 사용.
+    """
     try:
-        url = f"https://finnhub.io/api/v1/quote?symbol={ticker}&token={FINNHUB_API_KEY}"
-        d   = requests.get(url, timeout=10).json()
-        cur  = d.get("c", 0)
-        prev = d.get("pc", cur) or cur
-        if not cur:
-            return {"price": 0, "prevClose": 0, "changePercent": 0}
-        chg = ((cur - prev) / prev * 100) if prev else 0
-        return {"price": round(cur, 2), "prevClose": round(prev, 2), "changePercent": round(chg, 4)}
+        resp = requests.get(
+            f"{TOSS_BASE_URL}/api/v1/candles",
+            params={"symbol": ticker, "interval": "1d", "count": 2},
+            headers=auth_headers(),
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return 0
+        candles = resp.json().get("result", {}).get("candles", [])
+        if len(candles) >= 2:
+            return float(candles[1]["closePrice"])
+        elif len(candles) == 1:
+            return float(candles[0]["closePrice"])
+        return 0
     except Exception as e:
-        print(f"  [{ticker}] 오류: {e}")
-        return {"price": 0, "prevClose": 0, "changePercent": 0}
+        print(f"  [{ticker}] 전일종가 조회 오류: {e}")
+        return 0
 
 
 # ── 캐시 갱신 ────────────────────────────────────────────────────
 def refresh_cache():
     t0 = time.time()
     print(f"[{time.strftime('%H:%M:%S')}] 주가 갱신 시작...")
-    holdings    = get_holdings()
+
+    holdings    = FALLBACK_HOLDINGS
     all_tickers = ["SOXX", "SOXL"] + [h["ticker"] for h in holdings]
 
-    results = {}
-    def _fetch(t):
-        results[t] = fetch_single(t)
+    try:
+        prices = fetch_all_prices(all_tickers)
+    except Exception as e:
+        print(f"[ERROR] 현재가 일괄 조회 실패: {e}")
+        prices = {}
 
-    threads = [threading.Thread(target=_fetch, args=(t,)) for t in all_tickers]
+    prev_closes = {}
+    def _fetch_prev(t):
+        prev_closes[t] = fetch_prev_close(t)
+
+    threads = [threading.Thread(target=_fetch_prev, args=(t,)) for t in all_tickers]
     for th in threads: th.start()
-    for th in threads: th.join(timeout=20)
+    for th in threads: th.join(timeout=25)
+
+    def quote(t):
+        price = prices.get(t, 0)
+        prev  = prev_closes.get(t, 0) or price
+        chg   = ((price - prev) / prev * 100) if prev else 0
+        return {"price": round(price, 2), "prevClose": round(prev, 2), "changePercent": round(chg, 4)}
 
     def etf(t):
-        d = results.get(t, {})
-        return {"price": d.get("price", 0), "changePercent": d.get("changePercent", 0)}
+        q = quote(t)
+        return {"price": q["price"], "changePercent": q["changePercent"]}
 
     holding_data = []
     for h in holdings:
-        q   = results.get(h["ticker"], {})
-        chg = q.get("changePercent", 0)
+        q   = quote(h["ticker"])
+        chg = q["changePercent"]
         holding_data.append({
             **h,
-            "price":         q.get("price", 0),
-            "prevClose":     q.get("prevClose", 0),
+            "price":         q["price"],
+            "prevClose":     q["prevClose"],
             "changePercent": chg,
             "contribution":  round(chg * h["weight"] / 100, 5),
         })
@@ -173,16 +212,15 @@ def refresh_cache():
 
     soxx = etf("SOXX")
     soxl = etf("SOXL")
+    now  = int(time.time())
 
-    # ★ next_refresh_at을 서버가 직접 계산해서 내려줌 → 프론트 타이머 오차 없음
-    now = int(time.time())
     data = {
         "soxx":              soxx,
         "soxl":              soxl,
         "holdings":          holding_data,
         "updated_at":        now,
-        "next_refresh_at":   now + CACHE_TTL,        # ← 핵심 추가
-        "weight_updated_at": int(_weight_cache["updated_at"]),
+        "next_refresh_at":   now + CACHE_TTL,
+        "weight_updated_at": now,
     }
     with CACHE_LOCK:
         CACHE["data"] = data
@@ -195,20 +233,18 @@ def refresh_cache():
     )
 
 
-# ── 백그라운드 워커 ── 시작 직후 1회 갱신, 이후 5분 간격 ────────
 def background_worker():
     while True:
-        time.sleep(CACHE_TTL)   # ★ 먼저 대기 (최초 갱신은 메인에서 이미 함)
+        time.sleep(CACHE_TTL)
         try:
             refresh_cache()
         except Exception as e:
             print(f"[ERROR] {e}")
 
-refresh_cache()  # 서버 시작 시 1회 즉시 실행
+refresh_cache()
 threading.Thread(target=background_worker, daemon=True).start()
 
 
-# ── Flask 라우트 ─────────────────────────────────────────────────
 @app.route("/api/data")
 def api_data():
     with CACHE_LOCK:
@@ -219,14 +255,6 @@ def api_data():
     resp.headers["Cache-Control"] = "no-cache"
     return resp
 
-@app.route("/")
-def index():
-    return send_from_directory("static", "index.html")
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000, debug=False)
-
-# 수동 새로고침 전용 라우트 — 즉시 데이터 수집 후 반환
 @app.route("/api/refresh", methods=["POST"])
 def api_refresh():
     try:
@@ -238,3 +266,10 @@ def api_refresh():
         return resp
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route("/")
+def index():
+    return send_from_directory("static", "index.html")
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8000, debug=False)
