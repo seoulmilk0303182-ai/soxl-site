@@ -1,44 +1,24 @@
 """
-시발 SOXL 왜 올라요? — 백엔드 v7
-- 토스증권 공식 Open API (OpenAPI 3.1 스펙 기준)
-- GET /api/v1/prices?symbols=... 로 30개 종목 한 번에 조회 (최대 200개 지원)
-- GET /api/v1/candles 로 전일 종가 조회 (등락률 계산용)
-- 5분 주가 갱신
+시발 SOXL 왜 올라요? — 백엔드 최종판
+- yfinance 로 SOXX/SOXL + 30개 구성종목 주가 조회 (프리/애프터 포함)
+- /api/data  → 캐시된 데이터 즉시 반환 (자동갱신용)
+- /api/refresh → 즉시 yfinance 재수집 (수동 새로고침 버튼용)
+- 백그라운드 워커: 10초 단위 체크로 5분마다 자동갱신 (절전/탭비활성 누락 방지)
+- 비중: stockanalysis.com 스크래핑 (실패 시 fallback)
 
-★★★ 중요: API 키 설정 방법 ★★★
-절대 이 파일에 키를 직접 적지 마세요.
-
-[Windows CMD]
-set TOSS_CLIENT_ID=발급받은_ID
-set TOSS_CLIENT_SECRET=발급받은_SECRET
-python main.py
-
-[Windows PowerShell]
-$env:TOSS_CLIENT_ID="발급받은_ID"
-$env:TOSS_CLIENT_SECRET="발급받은_SECRET"
-python main.py
-
-⚠️ 키를 어딘가에 노출한 적이 있다면 토스증권 앱에서 즉시 재발급하세요.
+의존성: pip install flask yfinance requests
 """
 
 import time
 import threading
-import os
-from flask import Flask, jsonify, send_from_directory
+import re
 import requests
-
-TOSS_CLIENT_ID     = os.environ.get("TOSS_CLIENT_ID", "")
-TOSS_CLIENT_SECRET = os.environ.get("TOSS_CLIENT_SECRET", "")
-TOSS_BASE_URL       = "https://openapi.tossinvest.com"
-
-if not TOSS_CLIENT_ID or not TOSS_CLIENT_SECRET:
-    print("=" * 60)
-    print("[WARN] TOSS_CLIENT_ID / TOSS_CLIENT_SECRET 환경변수가 비어있습니다.")
-    print("=" * 60)
+from flask import Flask, jsonify, send_from_directory
+import yfinance as yf
 
 app = Flask(__name__, static_folder="static")
 
-# ── SOXX 구성종목 30개 (비중은 추정값) ───────────────────────────
+# ── SOXX 구성종목 fallback 비중 (2026년 기준 추정) ──────────────
 FALLBACK_HOLDINGS = [
     {"ticker": "MU",    "name": "마이크론",             "weight": 11.04},
     {"ticker": "AMD",   "name": "AMD",                  "weight": 9.51},
@@ -72,208 +52,132 @@ FALLBACK_HOLDINGS = [
     {"ticker": "AMKR",  "name": "Amkor",                "weight": 0.35},
 ]
 
+NAME_MAP = {h["ticker"]: h["name"] for h in FALLBACK_HOLDINGS}
+
+# ── 캐시 ─────────────────────────────────────────────────────────
 CACHE      = {"data": None}
 CACHE_LOCK = threading.Lock()
-CACHE_TTL  = 300
+CACHE_TTL  = 300   # 5분
 
-# ── OAuth 토큰 캐시 ───────────────────────────────────────────────
-_token_cache = {"access_token": None, "expires_at": 0}
-_token_lock  = threading.Lock()
+_weight_cache  = {"holdings": None, "updated_at": 0}
+WEIGHT_TTL     = 86400  # 비중은 하루 1회
 
-def get_access_token():
-    """
-    POST /oauth2/token
-    공식 스펙: body(form-urlencoded)에 grant_type, client_id, client_secret 전달.
-    """
-    with _token_lock:
-        now = time.time()
-        if _token_cache["access_token"] and now < _token_cache["expires_at"] - 300:
-            return _token_cache["access_token"]
 
-        if not TOSS_CLIENT_ID or not TOSS_CLIENT_SECRET:
-            raise RuntimeError("TOSS_CLIENT_ID/SECRET 환경변수가 설정되지 않았습니다.")
-
-        resp = requests.post(
-            f"{TOSS_BASE_URL}/oauth2/token",
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            data={
-                "grant_type":    "client_credentials",
-                "client_id":     TOSS_CLIENT_ID,
-                "client_secret": TOSS_CLIENT_SECRET,
-            },
-            timeout=10,
+# ── 비중 스크래핑 ────────────────────────────────────────────────
+def fetch_weights():
+    try:
+        r = requests.get(
+            "https://stockanalysis.com/etf/soxx/holdings/",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=20,
         )
-        if resp.status_code != 200:
-            raise RuntimeError(f"토큰 발급 실패 ({resp.status_code}): {resp.text[:200]}")
+        r.raise_for_status()
+        tbody = re.search(r'<tbody[^>]*>(.*?)</tbody>', r.text, re.S)
+        if not tbody:
+            raise ValueError("tbody not found")
+        holdings = []
+        for row in re.findall(r'<tr[^>]*>(.*?)</tr>', tbody.group(1), re.S):
+            cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.S)
+            if len(cells) < 4:
+                continue
+            ticker = re.sub(r'<[^>]+>', '', cells[1]).strip().upper()
+            if not ticker or ticker == 'SYMBOL':
+                continue
+            w_raw = re.sub(r'<[^>]+>', '', cells[3]).strip().replace('%','').replace(',','')
+            try:
+                weight = float(w_raw)
+            except ValueError:
+                continue
+            if weight <= 0:
+                continue
+            holdings.append({"ticker": ticker, "name": NAME_MAP.get(ticker, ticker), "weight": round(weight, 4)})
+        if len(holdings) < 10:
+            raise ValueError(f"종목 수 부족: {len(holdings)}")
+        holdings.sort(key=lambda x: x["weight"], reverse=True)
+        print(f"[{time.strftime('%H:%M:%S')}] 비중 {len(holdings)}개 갱신 (stockanalysis)")
+        return holdings
+    except Exception as e:
+        print(f"[WARN] 비중 스크래핑 실패: {e}")
+        return None
 
-        d = resp.json()
-        _token_cache["access_token"] = d["access_token"]
-        _token_cache["expires_at"]   = now + d.get("expires_in", 86400)
-        print(f"[{time.strftime('%H:%M:%S')}] 토스증권 토큰 발급 완료 (유효 {d.get('expires_in',86400)}초)")
-        return _token_cache["access_token"]
+
+def get_holdings():
+    now = time.time()
+    if _weight_cache["holdings"] is None or now - _weight_cache["updated_at"] > WEIGHT_TTL:
+        result = fetch_weights()
+        _weight_cache["holdings"]   = result or FALLBACK_HOLDINGS
+        _weight_cache["updated_at"] = now
+    return _weight_cache["holdings"]
 
 
-def auth_headers():
-    return {"Authorization": f"Bearer {get_access_token()}"}
+# ── yfinance 단건 시세 조회 (프리/애프터 포함) ───────────────────
+def fetch_single(ticker):
+    try:
+        t    = yf.Ticker(ticker)
+        fi   = t.fast_info
+        price      = float(getattr(fi, "last_price",     0) or 0)
+        prev_close = float(getattr(fi, "previous_close", 0) or 0)
+        market_state = "closed"
 
-
-# ── 현재가 일괄 조회 (최대 200개, 콤마 구분) ─────────────────────
-def fetch_all_prices(tickers):
-    """
-    GET /api/v1/prices?symbols=NVDA,AMD,...
-    응답: { result: [ {symbol, timestamp, lastPrice, currency}, ... ] }
-    30개 종목을 단 1번의 호출로 가져옵니다.
-    """
-    symbols_str = ",".join(tickers)
-    resp = requests.get(
-        f"{TOSS_BASE_URL}/api/v1/prices",
-        params={"symbols": symbols_str},
-        headers=auth_headers(),
-        timeout=15,
-    )
-    if resp.status_code != 200:
-        raise RuntimeError(f"현재가 조회 실패 ({resp.status_code}): {resp.text[:300]}")
-
-    d = resp.json()
-    result = d.get("result", [])
-
-    # ⚠️ 디버그: 응답이 비어있거나 예상과 다르면 원본을 그대로 출력
-    if not result:
-        print(f"[WARN] /api/v1/prices 응답에 result가 비어있음. 원본: {str(d)[:300]}")
-    else:
-        print(f"[DEBUG] /api/v1/prices 응답 {len(result)}건 수신. 샘플: {result[0]}")
-
-    prices = {}
-    for item in result:
         try:
-            prices[item["symbol"]] = float(item["lastPrice"])
-        except (KeyError, ValueError, TypeError) as e:
-            print(f"[WARN] 가격 파싱 실패: {item} ({e})")
+            info  = t.info
+            state = info.get("marketState", "CLOSED").upper()
+            reg   = float(info.get("regularMarketPrice",          0) or 0)
+            pre   = float(info.get("preMarketPrice",              0) or 0)
+            post  = float(info.get("postMarketPrice",             0) or 0)
+            prev_close = float(info.get("regularMarketPreviousClose", 0) or prev_close or reg)
 
-    missing = set(tickers) - set(prices.keys())
-    if missing:
-        print(f"[WARN] 응답에 없는 심볼: {sorted(missing)}")
+            if   state == "PRE"                    and pre:  price = pre;  market_state = "pre"
+            elif state in ("POST", "POSTPOST")     and post: price = post; market_state = "after"
+            elif reg:                                         price = reg;  market_state = "regular" if state == "REGULAR" else "closed"
+        except Exception:
+            pass
 
-    return prices
+        if not price:
+            return {"price": 0, "prevClose": 0, "changePercent": 0, "marketState": "closed"}
 
-
-# ── 전일 종가 조회 (일봉 캔들, 종목당 1콜) ───────────────────────
-def fetch_prev_close(ticker):
-    """
-    GET /api/v1/candles?symbol=AAPL&interval=1d&count=2
-    가장 최근 2개의 일봉 중 이전 봉의 종가를 전일 종가로 사용.
-    """
-    try:
-        resp = requests.get(
-            f"{TOSS_BASE_URL}/api/v1/candles",
-            params={"symbol": ticker, "interval": "1d", "count": 2},
-            headers=auth_headers(),
-            timeout=10,
-        )
-        if resp.status_code != 200:
-            print(f"  [{ticker}] candles 실패 ({resp.status_code}): {resp.text[:150]}")
-            return 0
-        candles = resp.json().get("result", {}).get("candles", [])
-        if len(candles) >= 2:
-            return float(candles[1]["closePrice"])
-        elif len(candles) == 1:
-            return float(candles[0]["closePrice"])
-        print(f"  [{ticker}] candles 응답에 봉이 없음")
-        return 0
+        prev = prev_close or price
+        chg  = ((price - prev) / prev * 100) if prev else 0
+        return {
+            "price":         round(price, 2),
+            "prevClose":     round(prev, 2),
+            "changePercent": round(chg, 4),
+            "marketState":   market_state,
+        }
     except Exception as e:
-        print(f"  [{ticker}] 전일종가 조회 오류: {e}")
-        return 0
+        print(f"  [{ticker}] 오류: {e}")
+        return {"price": 0, "prevClose": 0, "changePercent": 0, "marketState": "closed"}
 
 
-# ── 미국 장 운영 상태 조회 ────────────────────────────────────────
-def fetch_us_market_status():
-    """
-    GET /api/v1/market-calendar/US
-    현재 시각이 어느 세션(day/pre/regular/after/closed)인지 판단.
-    휴장이면 4세션 모두 null.
-    """
-    try:
-        resp = requests.get(
-            f"{TOSS_BASE_URL}/api/v1/market-calendar/US",
-            headers=auth_headers(),
-            timeout=10,
-        )
-        if resp.status_code != 200:
-            return "unknown"
-        today = resp.json().get("result", {}).get("today", {})
-
-        import datetime
-        now_iso = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
-
-        def in_session(session):
-            if not session:
-                return False
-            start = datetime.datetime.fromisoformat(session["startTime"])
-            end   = datetime.datetime.fromisoformat(session["endTime"])
-            return start <= now_iso <= end
-
-        if in_session(today.get("regularMarket")):
-            return "regular"
-        if in_session(today.get("preMarket")):
-            return "pre"
-        if in_session(today.get("afterMarket")):
-            return "after"
-        if in_session(today.get("dayMarket")):
-            return "day"
-        return "closed"
-    except Exception as e:
-        print(f"[WARN] 장 운영 상태 조회 실패: {e}")
-        return "unknown"
-
-
-# ── 캐시 갱신 ────────────────────────────────────────────────────
-def refresh_cache():
-    t0 = time.time()
-    print(f"[{time.strftime('%H:%M:%S')}] 주가 갱신 시작...")
-
-    holdings    = FALLBACK_HOLDINGS
+# ── 전체 데이터 수집 (공통) ──────────────────────────────────────
+def collect_data():
+    """yfinance로 전 종목 병렬 수집 후 딕셔너리 반환."""
+    t0       = time.time()
+    holdings = get_holdings()
     all_tickers = ["SOXX", "SOXL"] + [h["ticker"] for h in holdings]
 
-    market_status = fetch_us_market_status()
+    results = {}
+    def _fetch(tk):
+        results[tk] = fetch_single(tk)
 
-    try:
-        prices = fetch_all_prices(all_tickers)
-    except Exception as e:
-        import traceback
-        print(f"[ERROR] 현재가 일괄 조회 실패: {e}")
-        traceback.print_exc()
-        prices = {}
-
-    prev_closes = {}
-    def _fetch_prev(t):
-        prev_closes[t] = fetch_prev_close(t)
-
-    threads = [threading.Thread(target=_fetch_prev, args=(t,)) for t in all_tickers]
+    threads = [threading.Thread(target=_fetch, args=(tk,)) for tk in all_tickers]
     for th in threads: th.start()
-    for th in threads: th.join(timeout=25)
+    for th in threads: th.join(timeout=30)
 
-    def quote(t):
-        price = prices.get(t, 0)
-        prev  = prev_closes.get(t, 0) or price
-        # 장 마감(closed) 상태면 현재가도 전일 종가 기준으로 표시
-        # (lastPrice 가 휴장 중 갱신되지 않는 거래소 특성을 명시적으로 보정)
-        if market_status == "closed" and prev:
-            price = prev
-        chg = ((price - prev) / prev * 100) if prev else 0
-        return {"price": round(price, 2), "prevClose": round(prev, 2), "changePercent": round(chg, 4)}
+    market_status = results.get("SOXX", {}).get("marketState", "closed")
 
-    def etf(t):
-        q = quote(t)
-        return {"price": q["price"], "changePercent": q["changePercent"]}
+    def etf(tk):
+        d = results.get(tk, {})
+        return {"price": d.get("price", 0), "changePercent": d.get("changePercent", 0)}
 
     holding_data = []
     for h in holdings:
-        q   = quote(h["ticker"])
-        chg = q["changePercent"]
+        q   = results.get(h["ticker"], {})
+        chg = q.get("changePercent", 0)
         holding_data.append({
             **h,
-            "price":         q["price"],
-            "prevClose":     q["prevClose"],
+            "price":         q.get("price", 0),
+            "prevClose":     q.get("prevClose", 0),
             "changePercent": chg,
             "contribution":  round(chg * h["weight"] / 100, 5),
         })
@@ -283,18 +187,6 @@ def refresh_cache():
     soxl = etf("SOXL")
     now  = int(time.time())
 
-    data = {
-        "soxx":              soxx,
-        "soxl":              soxl,
-        "holdings":          holding_data,
-        "updated_at":        now,
-        "next_refresh_at":   now + CACHE_TTL,
-        "weight_updated_at": now,
-        "market_status":     market_status,
-    }
-    with CACHE_LOCK:
-        CACHE["data"] = data
-
     print(
         f"[{time.strftime('%H:%M:%S')}] 갱신 완료 ✓  "
         f"[{market_status}]  "
@@ -303,13 +195,37 @@ def refresh_cache():
         f"({len(holding_data)}종목, {time.time()-t0:.1f}s)"
     )
 
+    return {
+        "soxx":              soxx,
+        "soxl":              soxl,
+        "holdings":          holding_data,
+        "updated_at":        now,
+        "next_refresh_at":   now + CACHE_TTL,
+        "weight_updated_at": int(_weight_cache["updated_at"]),
+        "market_status":     market_status,
+    }
 
+
+# ── 캐시 갱신 (백그라운드 자동갱신용) ────────────────────────────
+def refresh_cache():
+    print(f"[{time.strftime('%H:%M:%S')}] [자동] 주가 갱신 시작...")
+    data = collect_data()
+    with CACHE_LOCK:
+        CACHE["data"] = data
+
+
+# ── 즉시 수집 (수동 새로고침 버튼용) ─────────────────────────────
+def force_refresh():
+    print(f"[{time.strftime('%H:%M:%S')}] [수동] 주가 갱신 시작...")
+    data = collect_data()
+    with CACHE_LOCK:
+        CACHE["data"] = data
+    return data
+
+
+# ── 백그라운드 워커 ───────────────────────────────────────────────
+# 10초마다 깨어나 "갱신 시각이 됐는지" 체크 → 절전/탭비활성 누락 방지
 def background_worker():
-    """
-    5분(CACHE_TTL)마다 갱신하되, time.sleep(300) 한 방에 의존하지 않고
-    10초 간격으로 깨어나 '갱신할 때가 됐는지' 체크합니다.
-    → 슬립/절전 등으로 인한 누락 없이 항상 정확한 시점에 갱신됩니다.
-    """
     while True:
         time.sleep(10)
         with CACHE_LOCK:
@@ -320,14 +236,18 @@ def background_worker():
             try:
                 refresh_cache()
             except Exception as e:
-                print(f"[ERROR] {e}")
+                print(f"[ERROR] 자동갱신 실패: {e}")
 
+
+# 서버 시작 시 1회 즉시 수집
 refresh_cache()
 threading.Thread(target=background_worker, daemon=True).start()
 
 
+# ── Flask 라우트 ─────────────────────────────────────────────────
 @app.route("/api/data")
 def api_data():
+    """자동갱신용 — 캐시된 데이터 즉시 반환 (빠름)"""
     with CACHE_LOCK:
         data = CACHE["data"]
     if data is None:
@@ -336,21 +256,23 @@ def api_data():
     resp.headers["Cache-Control"] = "no-cache"
     return resp
 
+
 @app.route("/api/refresh", methods=["POST"])
 def api_refresh():
+    """수동 새로고침 버튼용 — yfinance 즉시 재수집 후 반환 (5~15초 소요)"""
     try:
-        refresh_cache()
-        with CACHE_LOCK:
-            data = CACHE["data"]
+        data = force_refresh()
         resp = jsonify(data)
         resp.headers["Cache-Control"] = "no-cache"
         return resp
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 @app.route("/")
 def index():
     return send_from_directory("static", "index.html")
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=False)
