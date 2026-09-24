@@ -1,12 +1,12 @@
 """
 시발 SOXL 왜 올라요? — 백엔드
-- Yahoo Finance 배치 시세 API(v7/quote)로 SOXX/SOXL + 30개 구성종목을 "한 번에" 조회
-  → 종목당 2회씩 총 60여 회 요청하던 기존 방식(약 7~8초) 대비 0.2~1.5초로 단축
-- 프리장(PRE) / 정규장(REGULAR) / 애프터장(POST) 세션별 가격·등락률을 야후 값 그대로 사용
-- /api/data    → 캐시된 데이터 즉시 반환 (자동갱신용)
+- 시세: 야후 spark(인증 불필요, 20종목/요청) → 실패 시 야후 quote(crumb 인증)
+- 프리장 / 정규장 / 애프터장 / 장 마감을 야후 거래 달력으로 판정,
+  등락률은 모든 세션에서 직전 정규장 종가 대비로 직접 계산
+- 비중: iShares 공식 보유내역 CSV → stockanalysis → 내장 스냅샷
+- /api/data    → 유효하면 캐시 즉시, 만료됐으면 그 자리에서 갱신
 - /api/refresh → 즉시 재수집 (수동 새로고침 버튼용) — 동시 요청은 하나로 합침
 - 백그라운드 워커: 10초 단위 체크 (장중 60초 / 마감 5분 주기 자동갱신)
-- 비중: stockanalysis.com 스크래핑 (백그라운드 갱신, 실패 시 fallback)
 
 의존성: pip install flask yfinance requests
 """
@@ -18,7 +18,6 @@ import threading
 import re
 import requests
 from flask import Flask, jsonify, send_from_directory
-import yfinance as yf
 
 app = Flask(__name__, static_folder="static")
 
@@ -203,23 +202,33 @@ def get_holdings():
     return _weight_cache["holdings"]
 
 
-# ── Yahoo 배치 시세 조회 ─────────────────────────────────────────
-# yfinance 의 세션(YfData)을 빌려 쓰면 쿠키/crumb 인증을 알아서 처리해준다.
-QUOTE_URL    = "https://query2.finance.yahoo.com/v7/finance/quote"
+# ── 야후 시세 조회 ───────────────────────────────────────────────
+# 1순위 spark: 쿠키/crumb 인증이 필요 없어 클라우드 서버(Render 등)에서도 동작한다.
+#             요청당 20종목까지 → 32종목이면 2회.
+# 2순위 quote: crumb 인증이 필요하다. 데이터센터 IP 에서는 이 인증이 막히기 쉽다.
+#
+# 등락률은 야후가 준 % 를 쓰지 않고 가격으로 직접 계산한다. 야후의
+# postMarketChangePercent 는 '그날 정규장 종가' 기준이라, 애프터장에 하루 낙폭 대신
+# 애프터장 변동분만 나온다. 기준가는 모든 세션에서 직전 정규장 종가로 통일한다.
+SPARK_URL   = "https://query1.finance.yahoo.com/v7/finance/spark"
+SPARK_CHUNK = 20
+QUOTE_URL   = "https://query2.finance.yahoo.com/v7/finance/quote"
 QUOTE_FIELDS = ",".join([
     "symbol", "marketState", "gmtOffSetMilliseconds",
-    "regularMarketPrice",  "regularMarketChangePercent",
-    "preMarketPrice",  "preMarketChangePercent",  "preMarketTime",
-    "postMarketPrice", "postMarketChangePercent", "postMarketTime",
+    "regularMarketPrice", "regularMarketPreviousClose",
+    "preMarketPrice", "preMarketTime", "postMarketPrice", "postMarketTime",
 ])
-CHUNK_SIZE = 50   # 야후 quote API 심볼 개수 제한 여유분
+HTTP_TIMEOUT = 8   # gunicorn 기본 타임아웃(30초) 안에 두 소스를 모두 시도할 수 있게
 
-# 구버전 yfinance 에는 YfData 가 없을 수 있다 — 그 경우 개별 조회로만 동작
+_http = requests.Session()
+_http.headers["User-Agent"] = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                               "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36")
+
 try:
-    from yfinance.data import YfData
+    from yfinance.data import YfData    # quote 의 crumb 인증 처리용
     _yfdata = YfData()
 except Exception as _e:
-    print(f"[WARN] YfData 사용 불가 — 개별 조회로만 동작합니다: {_e}")
+    print(f"[WARN] YfData 사용 불가 — spark 만 사용합니다: {_e}")
     _yfdata = None
 
 
@@ -248,93 +257,101 @@ def _is_today_at(ts, gmt_offset_sec):
     return (a.tm_year, a.tm_mon, a.tm_mday) == (b.tm_year, b.tm_mon, b.tm_mday)
 
 
-def normalize_quote(q):
-    """야후 원본 quote → 현재 세션에 맞는 가격/등락률로 정규화."""
-    state = (q.get("marketState") or "CLOSED").upper()
-    off   = _f(q.get("gmtOffSetMilliseconds")) / 1000.0
+def price_and_change(session, reg, prev, ext, ext_ok):
+    """세션별 표시 가격과 등락률. 기준가는 직전 정규장 종가.
 
-    reg,  reg_p  = _f(q.get("regularMarketPrice")),  _f(q.get("regularMarketChangePercent"))
-    pre,  pre_p  = _f(q.get("preMarketPrice")),      _f(q.get("preMarketChangePercent"))
-    post, post_p = _f(q.get("postMarketPrice")),     _f(q.get("postMarketChangePercent"))
-    pre_t, post_t = q.get("preMarketTime"), q.get("postMarketTime")
-
-    if state == "PRE":
-        session = "pre"
-        if pre and _is_today_at(pre_t, off):
-            price, chg, quoted = pre, pre_p, True
-        else:
-            # 오늘 프리장 체결이 아직 없음 — 전일 종가 그대로, 변동 0
-            price, chg, quoted = reg, 0.0, False
-    elif state == "POST":
-        session = "after"
-        if post and _is_today_at(post_t, off):
-            price, chg, quoted = post, post_p, True
-        else:
-            price, chg, quoted = reg, reg_p, True   # 애프터 체결 없으면 정규장 종가 기준
-    elif state == "REGULAR":
-        session = "regular"
-        price, chg, quoted = reg, reg_p, True
+    reg    : 정규장 가격 (장중이면 현재가, 그 외엔 마지막 종가)
+    prev   : reg 직전 거래일의 정규장 종가
+    ext    : 프리/애프터 최근 체결가,  ext_ok: 그 체결이 이번 세션 것인지
+    """
+    if not reg:
+        return {"price": 0, "changePercent": 0, "quoted": False}
+    if session == "pre":
+        # 오늘 정규장이 아직 없으니 reg 가 곧 어제 종가 = 기준가
+        if not (ext and ext_ok):
+            return {"price": round(reg, 2), "changePercent": 0, "quoted": False}
+        price, base = ext, reg
     else:
-        # CLOSED / PREPRE / POSTPOST — 직전 정규장 종가 기준
-        session = "closed"
-        price, chg, quoted = reg, reg_p, True
-
-    if not price:
-        return {"price": 0, "changePercent": 0, "marketState": session, "quoted": False}
-
+        # 애프터장도 어제 종가와 비교 → 16시에 등락률이 뚝 끊기지 않는다
+        price = ext if (session == "after" and ext and ext_ok) else reg
+        base  = prev or reg
     return {
         "price":         round(price, 2),
-        "changePercent": round(chg, 4),
-        "marketState":   session,
-        "quoted":        quoted,
+        "changePercent": round((price - base) / base * 100, 4) if base else 0,
+        "quoted":        True,
     }
 
 
-def fetch_quotes(tickers):
-    """전 종목을 배치로 한 번에 조회."""
-    if _yfdata is None:
-        raise RuntimeError("YfData 없음")
+def _session_now(meta):
+    """currentTradingPeriod 로 지금 세션과 그 시작 시각. 휴장일·조기폐장도 야후 달력을 따른다."""
+    now = time.time()
+    periods = meta.get("currentTradingPeriod") or {}
+    for key, name in (("pre", "pre"), ("regular", "regular"), ("post", "after")):
+        p = periods.get(key) or {}
+        if p.get("start", 0) <= now < p.get("end", 0):
+            return name, p["start"]
+    return "closed", None
+
+
+def _spark_chunk(symbols):
+    r = _http.get(SPARK_URL, timeout=HTTP_TIMEOUT, params={
+        "symbols": ",".join(symbols), "range": "1d", "interval": "15m", "includePrePost": "true",
+    })
+    r.raise_for_status()
     out = {}
-    for i in range(0, len(tickers), CHUNK_SIZE):
-        chunk = tickers[i:i + CHUNK_SIZE]
-        r = _yfdata.get_raw_json(
-            QUOTE_URL,
-            params={"symbols": ",".join(chunk), "fields": QUOTE_FIELDS},
-            timeout=15,
-        )
-        for q in r.get("quoteResponse", {}).get("result", []):
-            sym = q.get("symbol")
-            if sym:
-                out[sym] = normalize_quote(q)
+    for item in (r.json().get("spark") or {}).get("result") or []:
+        resp = (item.get("response") or [None])[0]
+        if not resp:
+            continue
+        ts     = resp.get("timestamp") or []
+        closes = (((resp.get("indicators") or {}).get("quote") or [{}])[0].get("close")) or []
+        # 가장 최근 체결 봉 (프리·정규·애프터 포함)
+        last_t, last_p = next(((t, c) for t, c in zip(reversed(ts), reversed(closes))
+                               if c is not None), (None, None))
+        out[item["symbol"]] = (resp.get("meta") or {}, last_t, last_p)
     return out
 
 
-# ── 폴백: 종목별 개별 조회 (배치 실패 시에만) ────────────────────
-def fetch_single(ticker):
-    try:
-        fi    = yf.Ticker(ticker).fast_info
-        price = _f(getattr(fi, "last_price", 0))
-        prev  = _f(getattr(fi, "previous_close", 0)) or price
-        if not price:
-            return {"price": 0, "changePercent": 0, "marketState": "closed", "quoted": False}
-        chg = ((price - prev) / prev * 100) if prev else 0
-        return {"price": round(price, 2), "changePercent": round(chg, 4),
-                "marketState": "closed", "quoted": True}
-    except Exception as e:
-        print(f"  [{ticker}] 오류: {e}")
-        return {"price": 0, "changePercent": 0, "marketState": "closed", "quoted": False}
+def fetch_quotes_spark(tickers):
+    raw = {}
+    for i in range(0, len(tickers), SPARK_CHUNK):
+        raw.update(_spark_chunk(tickers[i:i + SPARK_CHUNK]))
+    ref = raw.get("SOXX") or next(iter(raw.values()), None)
+    if ref is None:
+        raise ValueError("spark 응답이 비어 있음")
+    session, started = _session_now(ref[0])
+
+    out = {}
+    for sym, (meta, last_t, last_p) in raw.items():
+        ext_ok = started is not None and last_t is not None and last_t >= started
+        q = price_and_change(session, _f(meta.get("regularMarketPrice")),
+                             _f(meta.get("previousClose") or meta.get("chartPreviousClose")),
+                             _f(last_p), ext_ok)
+        out[sym] = {**q, "marketState": session}
+    return out
 
 
-def fetch_quotes_fallback(tickers):
-    results = {}
+def fetch_quotes_v7(tickers):
+    if _yfdata is None:
+        raise RuntimeError("YfData 없음")
+    r = _yfdata.get_raw_json(QUOTE_URL, timeout=HTTP_TIMEOUT,
+                             params={"symbols": ",".join(tickers), "fields": QUOTE_FIELDS})
+    out = {}
+    for q in r.get("quoteResponse", {}).get("result", []):
+        state   = (q.get("marketState") or "").upper()
+        session = {"PRE": "pre", "REGULAR": "regular", "POST": "after"}.get(state, "closed")
+        ext, ext_t = {"pre":   (q.get("preMarketPrice"),  q.get("preMarketTime")),
+                      "after": (q.get("postMarketPrice"), q.get("postMarketTime"))
+                      }.get(session, (None, None))
+        ext_ok = _is_today_at(ext_t, _f(q.get("gmtOffSetMilliseconds")) / 1000.0)
+        q_out  = price_and_change(session, _f(q.get("regularMarketPrice")),
+                                  _f(q.get("regularMarketPreviousClose")), _f(ext), ext_ok)
+        if q.get("symbol"):
+            out[q["symbol"]] = {**q_out, "marketState": session}
+    return out
 
-    def _fetch(tk):
-        results[tk] = fetch_single(tk)
 
-    threads = [threading.Thread(target=_fetch, args=(tk,)) for tk in tickers]
-    for th in threads: th.start()
-    for th in threads: th.join(timeout=20)
-    return results
+QUOTE_SOURCES = (("spark", fetch_quotes_spark), ("quote", fetch_quotes_v7))
 
 
 # ── 전체 데이터 수집 ─────────────────────────────────────────────
@@ -343,15 +360,19 @@ def collect_data():
     holdings    = get_holdings()
     all_tickers = ["SOXX", "SOXL"] + [h["ticker"] for h in holdings]
 
-    source = "batch"
-    try:
-        results = fetch_quotes(all_tickers)
-        if len(results) < len(all_tickers) // 2:
-            raise ValueError(f"응답 종목 부족: {len(results)}/{len(all_tickers)}")
-    except Exception as e:
-        print(f"[WARN] 배치 조회 실패 → 개별 조회로 폴백: {e}")
-        results = fetch_quotes_fallback(all_tickers)
-        source  = "fallback"
+    results, source = None, None
+    for name, fetch in QUOTE_SOURCES:
+        try:
+            got = fetch(all_tickers)
+            if len(got) >= len(all_tickers) // 2:
+                results, source = got, name
+                break
+            print(f"[WARN] {name} 응답 종목 부족: {len(got)}/{len(all_tickers)}")
+        except Exception as e:
+            print(f"[WARN] {name} 시세 조회 실패: {e}")
+    if results is None:
+        # 0 이나 틀린 숫자로 채우지 않는다 — 캐시에 있던 직전 데이터가 그대로 유지된다
+        raise RuntimeError("시세 조회 실패 (spark, quote 모두)")
 
     market_status = results.get("SOXX", {}).get("marketState", "closed")
 
@@ -397,16 +418,30 @@ def collect_data():
     }
 
 
+FAIL_BACKOFF = 15            # 조회 실패 후 이 시간 동안은 야후를 다시 두드리지 않는다
+_last_fail   = {"at": 0.0}
+
+
 def refresh_cache(tag="자동"):
     """수집 후 캐시에 저장. 동시 호출은 락으로 묶어 실제 수집은 한 번만."""
     with _refresh_lock:
         with CACHE_LOCK:
             cached = CACHE["data"]
+        now = time.time()
         # 방금 다른 요청이 갱신했으면 그 결과를 재사용
-        if cached and time.time() - cached.get("updated_at", 0) < MIN_REFRESH_GAP:
+        if cached and now - cached.get("updated_at", 0) < MIN_REFRESH_GAP:
             return cached
+        # 방금 실패했으면 요청마다 타임아웃을 기다리게 하지 않고 직전 데이터를 준다
+        if now - _last_fail["at"] < FAIL_BACKOFF:
+            if cached:
+                return cached
+            raise RuntimeError("시세 조회 재시도 대기 중")
         print(f"[{time.strftime('%H:%M:%S')}] [{tag}] 주가 갱신 시작...")
-        data = collect_data()
+        try:
+            data = collect_data()
+        except Exception:
+            _last_fail["at"] = time.time()
+            raise
         with CACHE_LOCK:
             CACHE["data"] = data
         return data
