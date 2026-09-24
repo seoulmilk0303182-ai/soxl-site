@@ -296,6 +296,8 @@ def _session_now(meta):
 def _spark_chunk(symbols):
     r = _http.get(SPARK_URL, timeout=HTTP_TIMEOUT, params={
         "symbols": ",".join(symbols), "range": "1d", "interval": "15m", "includePrePost": "true",
+        # 야후 CDN 이 spark 응답을 5분간 캐시한다(max-age=300) — 주소를 매번 달리해 캐시를 비켜간다
+        "_": time.time_ns(),
     })
     r.raise_for_status()
     out = {}
