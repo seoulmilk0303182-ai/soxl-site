@@ -5,7 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>시발 SOXL 왜 올라요?</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Noto+Sans+KR:wght@400;700&display=swap" rel="stylesheet">
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
@@ -26,8 +27,9 @@
     --ok:    #4caf50;
     --ok-bg: rgba(76,175,80,0.12);
     --ok-bd: rgba(76,175,80,0.35);
-    --mono: 'JetBrains Mono', monospace;
-    --sans: 'Noto Sans KR', sans-serif;
+    /* 웹폰트가 도착하기 전에도 시스템 한글 폰트로 즉시 렌더 */
+    --mono: 'JetBrains Mono', ui-monospace, 'Cascadia Mono', Consolas, monospace;
+    --sans: 'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', system-ui, sans-serif;
     --r: 10px; --rl: 16px;
   }
   body { font-family: var(--sans); background: var(--bg); color: var(--text); min-height: 100vh; }
@@ -45,7 +47,9 @@
   .hdr.up-mode { border-bottom-color: rgba(255,77,77,0.3); }
   .hdr.dn-mode { border-bottom-color: rgba(77,159,255,0.3); }
 
-  .logo { font-family: var(--mono); font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 10px; }
+  .logo { font-family: var(--mono); font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 10px; min-width: 0; }
+  /* 문장을 한 덩어리로 묶어야 flex 가 "왜" / "떨어져요" 를 각각 줄바꿈하지 않는다 */
+  .logo-txt { white-space: nowrap; }
   /* 초기에는 색상 없음 — 데이터 로드 후 JS가 클래스 추가 */
   #logoSoxl { transition: color .4s; }
   #logoSoxl.up { color: var(--up); }
@@ -238,6 +242,9 @@
   .r-contrib { font-family: var(--mono); font-size: 12px; font-weight: 700; text-align: right; }
   .r-contrib.up { color: var(--up); }
   .r-contrib.dn { color: var(--dn); }
+  /* 프리장에 아직 체결이 없는 종목 — 0% 로 오해하지 않도록 대시로 표시 */
+  .r-chg.na, .r-contrib.na { color: var(--dim); font-weight: 400; }
+  .row.na .r-ticker, .row.na .r-name { opacity: .55; }
 
   /* MISC */
   .loading { text-align: center; padding: 60px; color: var(--muted); font-family: var(--mono); font-size: 13px; }
@@ -261,7 +268,7 @@
       gap: 8px;
       row-gap: 10px;
     }
-    .logo { font-size: 14px; flex-wrap: wrap; row-gap: 4px; }
+    .logo { font-size: 14px; gap: 8px; }
     .hdr-r { width: 100%; justify-content: space-between; }
     .countdown { font-size: 11px; }
     /* 터치 타겟을 키워 모바일에서 확실히 눌리도록 */
@@ -273,13 +280,19 @@
       touch-action: manipulation;
     }
   }
+
+  /* 아주 좁은 기기(360px 이하)에서도 로고 한 줄 유지 */
+  @media (max-width: 360px) {
+    .logo { font-size: 13px; gap: 6px; }
+    .live-badge { font-size: 9px; padding: 2px 6px; }
+  }
 </style>
 </head>
 <body>
 
 <header class="hdr" id="hdr">
   <div class="logo">
-    시발 <span id="logoSoxl">SOXL</span> 왜 <span id="logoVerb">올라요</span>?
+    <span class="logo-txt">시발 <span id="logoSoxl">SOXL</span> 왜 <span id="logoVerb">올라요</span>?</span>
     <span class="live-badge neutral" id="liveBadge">LIVE</span>
   </div>
   <div class="hdr-r">
@@ -290,7 +303,7 @@
       <span id="cntdwn">로딩 중...</span>
     </div>
     <button class="rbtn" id="rbtn" onclick="load(true)">
-      <svg id="rico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
         <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
         <path d="M21 3v5h-5"/>
         <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
@@ -307,14 +320,14 @@
   <div class="etf-grid">
     <div class="etf-card" id="soxxCard">
       <div class="etf-tag">iShares SOXX</div>
-      <div class="etf-lbl">SOXX · 현재가</div>
+      <div class="etf-lbl">SOXX · <span id="soxxLbl">현재가</span></div>
       <div class="etf-price" id="soxxPrice">--</div>
       <div class="etf-chg"   id="soxxChg">--</div>
       <div class="etf-sub">Philadelphia Semiconductor ETF</div>
     </div>
     <div class="etf-card" id="soxlCard">
       <div class="etf-tag">Direxion 3×</div>
-      <div class="etf-lbl">SOXL · 현재가</div>
+      <div class="etf-lbl">SOXL · <span id="soxlLbl">현재가</span></div>
       <div class="etf-price" id="soxlPrice">--</div>
       <div class="etf-chg"   id="soxlChg">--</div>
       <div class="etf-sub">SOXX 3배 레버리지 ETF</div>
@@ -351,14 +364,25 @@
 
   <div class="footer">
     * 기여도 = 종목 등락률 × SOXX 비중 (추정값). 실제 ETF 계산과 오차 있을 수 있음.<br>
-    * 비중은 매일 1회 자동 갱신. 5분마다 주가 자동 갱신.<br>
-    * 프리장(Pre) · 정규장(Regular) · 애프터장(Post) 모두 지원.<br>
+    * 비중은 iShares 공식 보유내역(SOXX 30종목)을 매일 1회 자동 갱신. 주가는 장중 1분 · 마감 후 5분 주기.<br>
+    * 프리장(Pre) · 정규장(Regular) · 애프터장(Post) 모두 지원. 등락률은 야후 기준 전일 종가 대비.<br>
+    * 프리장에 아직 체결이 없는 종목은 등락률을 <b>—</b> 로 표시합니다 (0%가 아님).<br>
     * SOXL은 일별 3× 레버리지이므로 장기 수익률이 SOXX×3과 다를 수 있음.
   </div>
 </main>
 
 <script>
 let allData = [], curFilter = 'all', nextAt = 0, cdTimer = null, statusTimer = null;
+
+// 종목명은 iShares CSV 에서 오므로 innerHTML 에 넣기 전에 이스케이프
+const esc = s => String(s ?? '').replace(/[&<>"']/g,
+  c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+// ETF 카드에 "지금 보고 있는 가격이 어느 장의 값인지" 표시.
+// 키는 서버가 내려주는 market_status 4종뿐이다.
+const SESSION_LABEL = {
+  pre: '프리장', regular: '현재가', after: '애프터장', closed: '전일 종가',
+};
 
 // ── 로고 + 헤더 테마 ─────────────────────────────────────────────
 function applyTheme(isUp) {
@@ -398,29 +422,36 @@ function showRefreshStatus(ok, msg) {
 }
 
 // ── 마켓 세션 ────────────────────────────────────────────────────
+// 서버 데이터가 오기 전 첫 화면용 추정치. 서머타임을 직접 계산하지 않도록
+// 뉴욕 시간대를 브라우저에 물어본다.
 function marketSession() {
-  const now = new Date();
-  const et  = new Date(now.getTime() + (now.getTimezoneOffset() + (-4) * 60) * 60000);
-  const t   = et.getHours() * 60 + et.getMinutes(), day = et.getDay();
-  if (day === 0 || day === 6) return 'closed';
+  const p = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(new Date()).reduce((o, x) => (o[x.type] = x.value, o), {});
+  if (p.weekday === 'Sat' || p.weekday === 'Sun') return 'closed';
+  const t = (+p.hour % 24) * 60 + (+p.minute);
   if (t >= 240 && t < 570)   return 'pre';
   if (t >= 570 && t < 960)   return 'reg';
   if (t >= 960 && t < 1200)  return 'post';
   return 'closed';
 }
+
+// 서버가 내려준 장 상태를 기억해 둔다 — 주기적 갱신이 이를 덮어쓰지 않도록.
+let lastServerStatus = null;
+
 function renderSession(serverStatus) {
+  // 서버는 pre/regular/after/closed 를, 첫 화면용 marketSession() 은 reg/post 를 준다.
   const map = {
-    pre:     ['🌅 프리장 (Pre-Market)',           'pre'],
-    day:     ['🌤 데이마켓 (Day Market)',          'pre'],
-    regular: ['🟢 정규장 (Regular Hours)',         'reg'],
-    reg:     ['🟢 정규장 (Regular Hours)',         'reg'],
-    after:   ['🌙 애프터장 (After-Hours)',         'post'],
-    post:    ['🌙 애프터장 (After-Hours)',         'post'],
-    closed:  ['⏸ 장 마감 — 전일 종가 기준',        'closed'],
-    unknown: ['⏸ 장 마감 — 전일 종가 기준',        'closed'],
+    pre:     ['🌅 프리장 (Pre-Market)',    'pre'],
+    regular: ['🟢 정규장 (Regular Hours)', 'reg'],
+    reg:     ['🟢 정규장 (Regular Hours)', 'reg'],
+    after:   ['🌙 애프터장 (After-Hours)', 'post'],
+    post:    ['🌙 애프터장 (After-Hours)', 'post'],
+    closed:  ['⏸ 장 마감 — 전일 종가 기준', 'closed'],
   };
   // 서버가 market_status 를 내려주면 그걸 우선 사용 (더 정확함)
-  const key = serverStatus || marketSession();
+  if (serverStatus) lastServerStatus = serverStatus;
+  const key = lastServerStatus || marketSession();
   const [label, cls] = map[key] || map.closed;
   document.getElementById('sessionBadge').innerHTML =
     `<div class="session-badge ${cls}">${label}</div>`;
@@ -442,9 +473,10 @@ async function load(manual = false) {
     if (d.error) throw new Error(d.error);
 
     const soxlUp = (d.soxl.changePercent || 0) >= 0;
+    const sLbl   = SESSION_LABEL[d.market_status] || '현재가';
 
-    renderETF('soxx', d.soxx);
-    renderETF('soxl', d.soxl);
+    renderETF('soxx', d.soxx, sLbl);
+    renderETF('soxl', d.soxl, sLbl);
     allData = d.holdings || [];
     renderVerdict();
     renderChart();
@@ -454,13 +486,16 @@ async function load(manual = false) {
     const ts  = d.updated_at        ? new Date(d.updated_at * 1000)        : new Date();
     const wts = d.weight_updated_at ? new Date(d.weight_updated_at * 1000) : null;
     let updTxt = '주가 갱신: ' + ts.toLocaleTimeString('ko-KR');
-    if (d.market_status === 'closed' || d.market_status === 'unknown') {
+    if (d.market_status === 'closed') {
       updTxt += '  ·  장 마감 — 전일 종가 표시 중';
     }
+    const naCnt = allData.filter(x => x.quoted === false).length;
+    if (naCnt) updTxt += `  ·  미체결 ${naCnt}종목(—)`;
     if (wts) updTxt += '  ·  비중 갱신: ' + wts.toLocaleDateString('ko-KR');
     document.getElementById('updated').textContent = updTxt;
 
-    nextAt = d.next_refresh_at || (Math.floor(Date.now() / 1000) + 300);
+    // 폰 시계가 서버와 어긋나 있어도 1초마다 재요청하지 않도록 최소 5초 간격
+    nextAt = Math.max(d.next_refresh_at || 0, Math.floor(Date.now() / 1000) + 5);
     startCountdown();
 
     if (manual) {
@@ -468,17 +503,24 @@ async function load(manual = false) {
       showRefreshStatus(true, `✓ 갱신 완료  ${elapsed}s`);
     }
   } catch(e) {
-    document.getElementById('chart').innerHTML =
-      `<div class="err-box">⚠️ ${e.message}<br><small>잠시 후 다시 시도해주세요</small></div>`;
+    // 보여주던 표가 있으면 지우지 않는다 — 모바일 순간 끊김 한 번에 화면이 날아가지 않도록
+    if (!allData.length) {
+      document.getElementById('chart').innerHTML =
+        `<div class="err-box">⚠️ ${esc(e.message)}<br><small>잠시 후 다시 시도합니다</small></div>`;
+    }
     if (manual) showRefreshStatus(false, `✗ 실패: ${e.message}`);
+    // 실패해도 자동갱신이 멈추지 않게 15초 뒤 재시도
+    nextAt = Math.floor(Date.now() / 1000) + 15;
+    startCountdown();
   }
 
   btn.classList.remove('spinning'); btn.disabled = false;
 }
 
 // ── ETF 카드 렌더 ────────────────────────────────────────────────
-function renderETF(id, data) {
+function renderETF(id, data, sessionLabel) {
   const c = data.changePercent || 0, isUp = c >= 0;
+  if (sessionLabel) document.getElementById(id + 'Lbl').textContent = sessionLabel;
   document.getElementById(id + 'Price').textContent = '$' + (data.price || 0).toFixed(2);
   const el = document.getElementById(id + 'Chg');
   el.textContent = (isUp ? '+' : '') + c.toFixed(2) + '%';
@@ -529,13 +571,13 @@ function renderVerdict() {
   if (isUp) {
     icon  = ROCKET_SVG;
     const t = ups[0], drag = dns[0];
-    title = t    ? `<b>${t.ticker}</b>(${t.name}) +${t.changePercent.toFixed(1)}% 덕에 올라요` : '전반적 상승';
-    sub   = drag ? `${drag.ticker}(${drag.changePercent.toFixed(1)}%)는 발목 잡는 중` : '하락 종목 없음';
+    title = t    ? `<b>${esc(t.ticker)}</b>(${esc(t.name)}) +${t.changePercent.toFixed(1)}% 덕에 올라요` : '전반적 상승';
+    sub   = drag ? `${esc(drag.ticker)}(${drag.changePercent.toFixed(1)}%)는 발목 잡는 중` : '하락 종목 없음';
   } else {
     icon  = SKULL_SVG;
     const t = dns[0], hero = ups[0];
-    title = t    ? `<b>${t.ticker}</b>(${t.name}) ${t.changePercent.toFixed(1)}% 때문에 내려요` : '전반적 하락';
-    sub   = hero ? `${hero.ticker}(+${hero.changePercent.toFixed(1)}%)은 혼자 버티는 중` : '상승 종목 없음';
+    title = t    ? `<b>${esc(t.ticker)}</b>(${esc(t.name)}) ${t.changePercent.toFixed(1)}% 때문에 내려요` : '전반적 하락';
+    sub   = hero ? `${esc(hero.ticker)}(+${hero.changePercent.toFixed(1)}%)은 혼자 버티는 중` : '상승 종목 없음';
   }
   const cls = isUp ? 'up' : 'dn';
   document.getElementById('verdict').className = 'verdict ' + cls;
@@ -553,8 +595,9 @@ function renderChart() {
   if (!allData.length) return;
   const srt = document.getElementById('srt').value;
   let data = [...allData];
-  if (curFilter === 'up') data = data.filter(d => d.contribution >= 0);
-  if (curFilter === 'dn') data = data.filter(d => d.contribution <  0);
+  // 판정 문구의 "상승 N종 / 하락 M종"과 같은 기준 — 미체결(0)은 어느 쪽에도 넣지 않는다
+  if (curFilter === 'up') data = data.filter(d => d.contribution > 0);
+  if (curFilter === 'dn') data = data.filter(d => d.contribution < 0);
   if (srt === 'chg')    data.sort((a,b) => Math.abs(b.changePercent) - Math.abs(a.changePercent));
   if (srt === 'weight') data.sort((a,b) => b.weight - a.weight);
   if (!data.length) {
@@ -566,14 +609,19 @@ function renderChart() {
     const isUp = d.contribution >= 0, cls = isUp ? 'up' : 'dn';
     const w    = Math.min(Math.abs(d.contribution) / maxAbs * 100, 100).toFixed(1);
     const sgn  = isUp ? '+' : '';
-    return `<div class="row">
-      <div class="r-ticker">${d.ticker}</div>
-      <div class="r-name">${d.name}</div>
-      <div class="r-bar"><div class="bar-track"><div class="bar-fill ${cls}" style="width:${w}%"></div></div></div>
+    // 프리장 미체결 종목: 등락률/기여도를 0% 대신 대시로
+    const na   = d.quoted === false;
+    const chgCell     = na ? '—' : `${sgn}${(d.changePercent||0).toFixed(2)}%`;
+    const contribCell = na ? '—' : `${sgn}${(d.contribution||0).toFixed(3)}%p`;
+    const tip  = na ? ' title="아직 체결 없음 (전일 종가 표시)"' : '';
+    return `<div class="row${na ? ' na' : ''}"${tip}>
+      <div class="r-ticker">${esc(d.ticker)}</div>
+      <div class="r-name">${esc(d.name)}</div>
+      <div class="r-bar"><div class="bar-track"><div class="bar-fill ${cls}" style="width:${na ? 0 : w}%"></div></div></div>
       <div class="r-weight">${(d.weight||0).toFixed(2)}%</div>
       <div class="r-price">$${(d.price||0).toFixed(2)}</div>
-      <div class="r-chg ${cls}">${sgn}${(d.changePercent||0).toFixed(2)}%</div>
-      <div class="r-contrib ${cls}">${sgn}${(d.contribution||0).toFixed(3)}%p</div>
+      <div class="r-chg ${na ? 'na' : cls}">${chgCell}</div>
+      <div class="r-contrib ${na ? 'na' : cls}">${contribCell}</div>
     </div>`;
   }).join('');
 }
@@ -606,8 +654,8 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // ── 초기화 ──────────────────────────────────────────────────────
+// 데이터 도착 전 한 번만 추정 배지를 그린다. 이후 세션 변경은 load() 가 반영한다.
 renderSession();
-setInterval(renderSession, 60000);
 load();
 </script>
 </body>
